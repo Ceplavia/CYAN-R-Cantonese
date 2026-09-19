@@ -1,0 +1,18 @@
+# Rust build output — binaries, installer artifacts, WinUI deps
+target/
+
+# Generated dictionary DB (rebuild: cargo run -p preparing)
+rcantonese/ime.sqlite3
+
+# Debug symbols
+*.pdb
+
+# Deployed/old DLL copies
+r-cantonese-old*.dll
+r-cantonese.prev*.dll
+
+# OS / editor junk
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/

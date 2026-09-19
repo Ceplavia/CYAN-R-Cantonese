@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["preparing", "rcantonese", "config-center", "tray"]
+
+[profile.release]
+lto = true
+opt-level = 2

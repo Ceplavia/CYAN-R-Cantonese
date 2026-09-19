@@ -1,0 +1,17 @@
+
+## 已知問題（2026-09-19 記錄）
+
+### Tray icon 唔穩定
+- 重開 app 之後「中」又消失（殭屍 worker 探針有做，但仲有其它 path 會死）
+- 喺其它注入咗嘅 process（例如 QQ）切輸入法切唔出嚟；再開返 Notepad tray 又冇
+- 可能方向：claim/visible poll 嘅時序、focus event 次序、process 之間 HKL 快取、QQ 類 app 嘅 IME switch 行為
+
+### 右鍵菜單
+- 我哋自己嘅 tray icon 先有右鍵 menu — 係正常（所有 IME 嘅 langbar 圖標本身冇右鍵）
+- TF langbar menu（Windows 自動加「R-Cantonese v0.8.0」尾項嗰個）入面 MORE_SETTINGS 有冇出要驗證 — menu_items() 係共用嘅
+
+### 部署
+- DLL: target\debug\r-cantonese.dll（由 r_cantonese.dll copy）— 舊版備份 r-cantonese-oldNN.dll
+- Config center: target\debug\config-center.exe（windows-reactor + WinUI3 self-contained）
+- 改完要重開被注入 app 先 load 新 DLL
+- 測試機用戶系統語言係英文 — menu 語言跟 OS/ui_language 設定
