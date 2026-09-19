@@ -1,10 +1,12 @@
 # R-Cantonese
 
+粵語 | **[English](readme-en.md)**
+
 用 Rust 寫嘅 Windows 粵拼輸入法。
 
 <p align="center">★ 特別鳴謝 ★</p>
 
-[rime-cantonese](https://github.com/rime/rime-cantonese) | [yuetyam/jyutping-windows](https://github.com/yuetyam/jyutping-windows)
+<p align="center"><a href="https://github.com/rime/rime-cantonese">rime-cantonese</a> | <a href="https://github.com/yuetyam/jyutping-windows">yuetyam/jyutping-windows</a></p>
 
 <p align="center">★ 特別鳴謝 ★</p>
 
@@ -16,7 +18,6 @@
   - `` ` ``開頭 — 普通話拼音反查
   - `v` 開頭 — 倉頡反查
   - `x` 開頭 — 筆畫反查
-  - `q` 開頭 — 結構（速成）反查
 - **`/` 符號查詢** — `/` 開頭出符號表：`/數字` 出全形數字變體、`/字母` 反查單字粵拼 + emoji
 - **候選窗自訂** — 字號、編號字號、註釋字號、每頁數目、顏色全部可以喺配置中心改
 - **字符集切換** — 繁體（香港）/ 繁體（台灣）/ 簡體，候選字跟住變
