@@ -1,8 +1,10 @@
 # R-Cantonese
 
-<p align="center">★ 特別鳴謝 [rime-cantonese](https://github.com/rime/rime-cantonese) | [yuetyam/jyutping-windows](https://github.com/yuetyam/jyutping-windows) ★</p>
-
 用 Rust 寫嘅 Windows 粵拼輸入法。
+
+<p align="center">★ 特別鳴謝 ★</p>
+[rime-cantonese](https://github.com/rime/rime-cantonese) | [yuetyam/jyutping-windows](https://github.com/yuetyam/jyutping-windows)
+<p align="center">★ 特別鳴謝 ★</p>
 
 ## 有咩好用
 
