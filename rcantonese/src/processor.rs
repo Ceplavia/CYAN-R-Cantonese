@@ -920,7 +920,11 @@ impl Processor {
 
         fn setup_language_bar(&mut self, thread_mgr: &ITfThreadMgr, is_secure_mode: bool) {
                 let item: ComObject<LangBarItem> = LangBarItem::new(
-                        globals::GUID_LANGBAR_INPUT_MODE,
+                        // Must be the reserved GUID_LBI_INPUTMODE — since
+                        // Windows 8 the tray only renders the item whose
+                        // GetInfo returns this guid; a custom guid registers
+                        // fine but never displays.
+                        windows::Win32::UI::TextServices::GUID_LBI_INPUTMODE,
                         crate::strings::text_or(crate::strings::IDS_LANGBAR_INPUT_METHOD_MODE, "Input Mode"),
                         crate::strings::text_or(crate::strings::IDS_LANGBAR_INPUT_MODE_TOOLTIP, "Input Mode"),
                         globals::IDI_INPUT_MODE_CANTONESE,
