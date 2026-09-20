@@ -118,15 +118,47 @@ pub fn register_profiles() -> bool {
                         globals::log_error(&format!("RegisterProfiles: RegisterProfile failed: {code:?}"));
                         return false;
                 }
-                install_layout_or_tip(false);
+                // InstallLayoutOrTip must run in the *user's* context — when
+                // called elevated (regsvr32 RunAs admin) it lands on the
+                // .DEFAULT hive instead of the user profile, so the tip
+                // never enters the language list and stray default
+                // keyboards get added there. The tray exe enables the tip
+                // at startup instead.
+                if !is_process_elevated() {
+                        install_layout_or_tip(false);
+                }
                 true
+        }
+}
+
+/// Whether the current process runs with an elevated token.
+fn is_process_elevated() -> bool {
+        use windows::Win32::Security::*;
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        unsafe {
+                let mut token = HANDLE::default();
+                if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+                        return false;
+                }
+                let mut elevation = TOKEN_ELEVATION::default();
+                let mut len = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+                let ok = GetTokenInformation(
+                        token,
+                        TokenElevation,
+                        Some(&mut elevation as *mut _ as *mut std::ffi::c_void),
+                        len,
+                        &mut len,
+                )
+                .is_ok();
+                let _ = CloseHandle(token);
+                ok && elevation.TokenIsElevated != 0
         }
 }
 
 /// Enable/disable the profile in the user's input list via
 /// input.dll!InstallLayoutOrTip — weasel's mechanism; surgical, never
 /// rewrites the whole language list (that drops other IMEs' tips).
-fn install_layout_or_tip(uninstall: bool) {
+pub fn install_layout_or_tip(uninstall: bool) {
         const ILOT_UNINSTALL: u32 = 0x1;
         unsafe {
                 let module = match LoadLibraryW(w!("input.dll")) {

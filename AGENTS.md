@@ -15,6 +15,12 @@
 - balloon 要 icon 先彈到 — `balloon_until` 臨時頂起 icon 10s，prune timer 到期自動收
 - config-center 有「托盤圖標」ToggleSwitch
 
+### InstallLayoutOrTip 嘅 context 陷阱
+- **elevated regsvr32 入面 call 會落去 `.DEFAULT` hive** — tip 唔會入到用戶語言清單，仲會喺 .DEFAULT 加埋「關聯預設鍵盤」（en-US/en-HK/zh 系列 US layout → flyout 幻影 US entry）
+- 所以 `register_profiles` 入面 elevated 會 skip；**tray.exe 啟動時 `ensure_input_tip()`** 喺 user context 補上（idempotent，login 自啟）
+- uninstall 方向 elevated 係 work 嘅 — `install_layout_or_tip(true)` 保留喺 `DllUnregisterServer`
+- 幻影殘留位：`User Profile\Languages`（multi_sz）+ `User Profile\<lang>` key + `CTF\SortOrder\AssemblyItem` + `.DEFAULT` 同位 — 全部要 surgical 清
+
 ### 32-bit 程序
 - `r-cantonese.dll` 係 x64 — 32-bit app 物理上 load 唔到（「注入失敗切唔到」嘅元兇）
 - i686 build：`cargo build --release -p r-cantonese --target i686-pc-windows-msvc` → `target\i686-pc-windows-msvc\release\r_cantonese.dll`

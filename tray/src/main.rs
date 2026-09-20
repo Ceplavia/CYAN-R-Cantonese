@@ -39,6 +39,30 @@ const TRAY_MAGIC: isize = 0x5243; // 'RC'
 const PRUNE_TIMER_ID: usize = 1;
 
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
+/// Our input tip — `{langid}:{clsid}{profile_guid}` for InstallLayoutOrTip.
+const INPUT_TIP: &str = "0C04:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+
+/// Enable the IME in the user's input list — InstallLayoutOrTip must run in
+/// a non-elevated context (from regsvr32/admin it lands on .DEFAULT), and
+/// the tray runs as the logged-in user at every login anyway.
+fn ensure_input_tip() {
+        use windows::Win32::Foundation::FreeLibrary;
+        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        unsafe {
+                let Ok(module) = LoadLibraryW(w!("input.dll")) else { return };
+                let Some(proc_addr) = GetProcAddress(module, s!("InstallLayoutOrTip")) else {
+                        let _ = FreeLibrary(module);
+                        return;
+                };
+                let f: unsafe extern "system" fn(PCWSTR, u32) -> BOOL = std::mem::transmute(proc_addr);
+                let wide: Vec<u16> = INPUT_TIP.encode_utf16().chain(Some(0)).collect();
+                let ok = f(PCWSTR(wide.as_ptr()), 0);
+                if !ok.as_bool() {
+                        log_error("InstallLayoutOrTip failed (tray ensure)");
+                }
+                let _ = FreeLibrary(module);
+        }
+}
 const TRAY_ICON_ID: u32 = 0x4341;
 const IDM_CONFIG_CENTER: u32 = 1;
 
@@ -177,6 +201,9 @@ fn main() {
                         log_error(&format!("CreateWindowExW failed err={:?}", GetLastError()));
                         return;
                 }
+                // Enable our input tip — idempotent; repairs a registration
+                // where the elevated regsvr32 couldn't reach the user hive.
+                ensure_input_tip();
                 // Another tray.exe may have raced us — only a window owned by
                 // a real tray.exe (not a stale in-process worker) blocks us.
                 for w in class_windows() {
