@@ -24,8 +24,10 @@ OutputBaseFilename=r-cantonese-setup-{#AppVersion}
 WizardStyle=modern
 SetupIconFile=rcantonese\resources\jyutping.ico
 ; The DLL may still be loaded in host processes → restartreplace below.
-CloseApplications=yes
-CloseApplicationsFilter=r-cantonese-tray.exe,config-center.exe
+; CloseApplications stays OFF — the Restart Manager session in wpPreparing
+; hangs/crashes setup on some machines; our taskkill in ssInstall stops the
+; helpers instead, and injected hosts are handled by restartreplace.
+CloseApplications=no
 RestartIfNeededByRun=no
 UninstallDisplayName={#AppName} 輸入法
 VersionInfoVersion={#AppVersion}
