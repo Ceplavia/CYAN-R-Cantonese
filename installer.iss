@@ -43,7 +43,7 @@ Source: "target\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantone
 Source: "target\i686-pc-windows-msvc\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese-x86.dll"; Flags: restartreplace ignoreversion
 Source: "target\release\r-cantonese-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "target\release\config-center.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "rcantonese\ime.sqlite3"; DestDir: "{app}"; Flags: ignoreversion
+Source: "rcantonese\ime.sqlite3"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 ; WinUI3 self-contained runtime for config-center (en-US + zh locales only).
 Source: "target\release\Microsoft.*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "target\release\CoreMessagingXP.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -97,8 +97,58 @@ begin
   end;
 end;
 
+// Delete-on-reboot fallback for files still locked by injected processes.
+function MoveFileExW(Existing: String; NewName: Integer; Flags: DWORD): BOOL;
+  external 'MoveFileExW@kernel32.dll stdcall';
+const MOVEFILE_DELAY_UNTIL_REBOOT = $4;
+
+// Files the IME leaves locked at uninstall time (the dll stays mapped in
+// injected processes; ime.sqlite3 stays open). Renaming a loaded file is
+// allowed, so move leftovers out of {app} and queue them for deletion on
+// reboot — the install dir then comes out clean.
+procedure SweepLockedLeftovers();
+var
+  FindRec: TFindRec;
+  AppDir, Path, Staging: String;
+begin
+  AppDir := ExpandConstant('{app}');
+  Staging := ExpandConstant('{tmp}\r-cantonese-leftover');
+  ForceDirectories(Staging);
+  if FindFirst(AppDir + '\r-cantonese*.dll', FindRec) then
+  begin
+    try
+      repeat
+        Path := AppDir + '\' + FindRec.Name;
+        if not DeleteFile(Path) then
+        begin
+          if not RenameFile(Path, Staging + '\' + FindRec.Name) then
+            MoveFileExW(Path, 0, MOVEFILE_DELAY_UNTIL_REBOOT);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  if FindFirst(AppDir + '\ime.sqlite3', FindRec) then
+  begin
+    try
+      repeat
+        Path := AppDir + '\' + FindRec.Name;
+        if not DeleteFile(Path) then
+        begin
+          if not RenameFile(Path, Staging + '\' + FindRec.Name) then
+            MoveFileExW(Path, 0, MOVEFILE_DELAY_UNTIL_REBOOT);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  RemoveDir(AppDir);
+end;
+
 // On uninstall: kill helpers first, let [UninstallRun] unregister, then
-// after file removal offer to delete per-user data.
+// after file removal sweep locked leftovers and offer to delete per-user data.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
@@ -110,6 +160,7 @@ begin
   end;
   if CurUninstallStep = usPostUninstall then
   begin
+    SweepLockedLeftovers();
     // Log dir — always safe to remove.
     DataDir := ExpandConstant('%TEMP%\RCantonese');
     if DirExists(DataDir) then
