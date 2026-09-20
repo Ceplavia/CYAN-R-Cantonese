@@ -69,9 +69,11 @@ Filename: "regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese.dll"""; Flags: run
 ; 32-bit view of regsvr32 → writes WOW6432Node CLSID + TIP for x86 apps.
 Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese (32-bit)..."
 ; Tray host starts now (un-elevated, as the installing user) and at login.
-Filename: "{app}\r-cantonese-tray.exe"; Flags: runasoriginaluser nowait
+; postinstall → launched from the Finish page's checkbox, so a slow/hung
+; spawn can never freeze the wizard mid-install.
+Filename: "{app}\r-cantonese-tray.exe"; Flags: runasoriginaluser nowait postinstall
 ; Config center opens at the end so the user can tweak or just close it.
-Filename: "{app}\config-center.exe"; Flags: runasoriginaluser nowait skipifsilent
+Filename: "{app}\config-center.exe"; Flags: runasoriginaluser nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Before files are deleted: unregister the IME (drops the input tip, the

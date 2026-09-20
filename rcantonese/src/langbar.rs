@@ -675,14 +675,35 @@ impl ITfLangBarItem_Impl for LangBarItem_Impl {
 }
 
 impl ITfLangBarItemButton_Impl for LangBarItem_Impl {
-        fn OnClick(&self, click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
+        fn OnClick(&self, click: TfLBIClick, pt: &POINT, _prcarea: *const RECT) -> Result<()> {
                 crate::globals::log(&format!("langbar OnClick click={}", click.0));
                 guarded(|| {
                         const TF_LBI_CLK_LEFT: i32 = 0;
-                        // Right-click is driven by the shell through
-                        // InitMenu/OnMenuSelect (BTN_MENU style) — nothing to
-                        // do here. Left-click toggles the open/close mode.
                         if click.0 != TF_LBI_CLK_LEFT {
+                                // TF_LBI_CLK_RIGHT — in tray rendering the
+                                // shell calls OnClick and expects us to pop
+                                // the menu ourselves (weasel does the same
+                                // via TrackPopupMenuEx); InitMenu is only
+                                // used by the classic desktop language bar.
+                                // Run it on a worker thread — the popup is
+                                // modal and must not block the shell's call.
+                                let handler = self.settings_handler.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                                let point = *pt;
+                                if let Some(weak) = handler {
+                                        // SendPtr — in-proc COM objects are
+                                        // free-threaded; only the worker
+                                        // thread dereferences the Weak.
+                                        let weak = SendPtr(weak);
+                                        std::thread::spawn(move || {
+                                                // Bind first — a field access
+                                                // (weak.0) would capture just
+                                                // the non-Send field.
+                                                let weak = weak;
+                                                if let Some(processor) = weak.0.upgrade() {
+                                                        show_settings_menu_at(point, &processor);
+                                                }
+                                        });
+                                }
                                 return Ok(());
                         }
                         let Some(compartment) = self.compartment() else {
