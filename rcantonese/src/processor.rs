@@ -231,7 +231,12 @@ impl Processor {
         }
 
         pub fn should_handle_input_method_mode_key(&self, guid: &GUID) -> bool {
-                *guid == globals::GUID_PRESERVEDKEY_INPUT_MODE && self.check_shift_key_only(guid)
+                // Caps Lock is a hard English override — while it's on the
+                // Shift toggle must not flip the compartment (the icon and
+                // effective mode stay "en").
+                *guid == globals::GUID_PRESERVEDKEY_INPUT_MODE
+                        && self.check_shift_key_only(guid)
+                        && !crate::keys::caps_lock_on()
         }
 
         pub fn is_character_variant_key(&self, guid: &GUID) -> bool {

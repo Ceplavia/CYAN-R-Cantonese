@@ -502,16 +502,24 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                         let (Some(processor), Some(thread_mgr)) = (state.processor.clone(), state.thread_mgr.clone()) else {
                                 return Ok(BOOL(0));
                         };
+                        let composing = state.is_composing();
+                        let finalize_args = (state.self_iunknown.clone(), state.context.clone(), state.client_id);
+                        drop(state);
+                        // Only pre-commit when the preserved key will really
+                        // switch modes — Shift+digit keyup fires the same
+                        // INPUT_MODE guid but check_shift_key_only rejects
+                        // it, and finalizing here would kill the symbol
+                        // candidates the user just opened.
+                        let will_toggle = guid == globals::GUID_PRESERVEDKEY_INPUT_MODE
+                                && processor
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .should_handle_input_method_mode_key(&guid);
                         // A mode switch mid-composition would leave the
                         // composition dangling — later keys pass through raw
                         // and Space lands as a literal space. Commit the raw
                         // buffer first (async — never block a key dispatch).
-                        let finalize = if state.is_composing() {
-                                Some((state.self_iunknown.clone(), state.context.clone(), state.client_id))
-                        } else {
-                                None
-                        };
-                        drop(state);
+                        let finalize = if will_toggle && composing { Some(finalize_args) } else { None };
                         if let Some((Some(svc), Some(ctx), client_id)) = finalize {
                                 let _ = crate::composition::request_edit_session(
                                         &svc,

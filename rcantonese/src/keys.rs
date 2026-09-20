@@ -41,7 +41,7 @@ fn is_keyboard_open(state: &ServiceState) -> bool {
 
 /// Whether Caps Lock is toggled on — the IME treats it as English mode:
 /// keys pass through untouched and the mode indicator shows "A".
-fn caps_lock_on() -> bool {
+pub(crate) fn caps_lock_on() -> bool {
         use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
         unsafe { GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0 }
 }
@@ -87,6 +87,10 @@ pub fn test_key(
         let caps = caps_lock_on();
         if CAPS_WAS_ON.swap(caps, std::sync::atomic::Ordering::Relaxed) != caps {
                 crate::tray::update_mode(is_keyboard_open(state) && !caps);
+                // Caps isn't a compartment change — the langbar icon won't
+                // refresh on its own, so poke it (deferred — we're inside a
+                // key dispatch).
+                crate::langbar::post_refresh_all();
         }
         if caps {
                 if is_key_down {

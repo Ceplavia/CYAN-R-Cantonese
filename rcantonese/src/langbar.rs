@@ -315,11 +315,22 @@ pub fn deferred_refresh(item_ptr: usize) {
         }
         let item = unsafe { &*(item_ptr as *const LangBarItem) };
         item.notify_update(TF_LBI_ICON | TF_LBI_STATUS);
-        // Mirror the new mode onto the tray icon.
+        // Mirror the new mode onto the tray icon — Caps Lock forces "en"
+        // without touching the compartment, same as GetIcon does.
         if let Some(compartment) = item.compartment() {
                 if let Ok(is_open) = compartment.get_bool() {
-                        crate::tray::update_mode(is_open);
+                        crate::tray::update_mode(is_open && !crate::keys::caps_lock_on());
                 }
+        }
+}
+
+/// Post a deferred refresh for every live langbar item — for mode changes
+/// that aren't compartment events (Caps Lock), which never trigger the
+/// compartment sink.
+pub fn post_refresh_all() {
+        let items: Vec<usize> = REFRESH_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for ptr in items {
+                crate::tray::post_langbar_refresh(ptr);
         }
 }
 
@@ -726,11 +737,14 @@ impl LangBarItem_Impl {
         fn get_icon_inner(&self) -> Result<HICON> {
                 use windows::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_DEFAULTCOLOR};
                 // Default to the Cantonese-mode icon when the compartment is
-                // not yet registered.
+                // not yet registered. Caps Lock is a hard English override —
+                // it doesn't touch the compartment, so it must be checked
+                // here explicitly.
                 let is_on = self
                         .compartment()
                         .and_then(|c| c.get_bool().ok())
-                        .unwrap_or(true);
+                        .unwrap_or(true)
+                        && !crate::keys::caps_lock_on();
                 let status = self.status.load(Ordering::Relaxed);
                 const TF_LBI_STATUS_DISABLED: u32 = 0x04;
                 let cx = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXICON) };
