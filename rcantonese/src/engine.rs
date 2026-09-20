@@ -283,7 +283,13 @@ pub fn pinyin_scheme_mark(scheme: &PinyinScheme) -> String {
 
 impl CoreImeEngine {
         pub fn prepare() -> Option<Self> {
+                globals::log("engine::prepare before open_default");
                 let database = ImeDatabase::open_default()?;
+                globals::log("engine::prepare after open_default");
+                if cfg!(debug_assertions) && std::env::var("RCANTONESE_SKIP_ENGINE").is_ok() {
+                        globals::log("engine::prepare skipped (RCANTONESE_SKIP_ENGINE)");
+                        return None;
+                }
                 Self::prepare_with(database)
         }
 
@@ -294,10 +300,12 @@ impl CoreImeEngine {
 
         fn prepare_with(database: ImeDatabase) -> Option<Self> {
                 let mut segmenter = Segmenter::new();
+                globals::log("engine::prepare_with before segmenter");
                 if !segmenter.prepare(&database) {
                         globals::log_error("R-Cantonese segmenter prepare failed");
                         return None;
                 }
+                globals::log("engine::prepare_with after segmenter");
                 let mut pinyin_syllables = std::collections::HashMap::new();
                 for row in database.query_pinyin_syllables() {
                         pinyin_syllables.insert(
@@ -309,6 +317,7 @@ impl CoreImeEngine {
                                 },
                         );
                 }
+                globals::log("engine::prepare_with done");
                 Some(Self {
                         database,
                         segmenter,

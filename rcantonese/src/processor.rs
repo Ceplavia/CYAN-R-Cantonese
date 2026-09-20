@@ -142,7 +142,11 @@ impl Processor {
                 processor.keys.set_candidate_list_range(processor.settings.candidate_page_size);
                 processor.setup_preserved(thread_mgr);
                 processor.setup_language_bar(thread_mgr, false);
-                processor.engine = CoreImeEngine::prepare();
+                if cfg!(debug_assertions) && std::env::var("RCANTONESE_SKIP_ENGINE").is_err() {
+                        processor.engine = CoreImeEngine::prepare();
+                } else {
+                        crate::globals::log("Processor::new engine skipped");
+                }
                 crate::globals::log(&format!(
                         "Processor::new engine={} db={}",
                         processor.engine.is_some(),

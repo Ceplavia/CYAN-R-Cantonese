@@ -201,10 +201,13 @@ pub struct ImeDatabase {
 
 impl ImeDatabase {
         pub fn open(path: &Path) -> Option<Self> {
+                globals::log(&format!("db::open {}", path.display()));
                 let path_text = path.to_str()?;
                 let c_path = CString::new(path_text).ok()?;
                 let mut raw: *mut Sqlite3 = ptr::null_mut();
+                globals::log("db::open before sqlite3_open_v2");
                 let result = unsafe { sqlite3_open_v2(c_path.as_ptr(), &mut raw, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, ptr::null()) };
+                globals::log(&format!("db::open result={result}"));
                 if result != SQLITE_OK {
                         globals::log_error(&format!("ImeDatabase open failed ({result}): {}", error_message(raw)));
                         if !raw.is_null() {

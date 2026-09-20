@@ -28,6 +28,35 @@
 - `winsqlite3` 用 `kind = "raw-dylib"` — 唔使 SDK import lib
 - installer 包 `r-cantonese-x86.dll`，uninstall 用 SysWOW64 regsvr32 /u
 
+### ⚠️ x86 DLL 注入會 crash host — 調查中（2026-09-20 深夜）
+**病徵**：任何 32-bit process 激活 IME（TSF inject `r-cantonese-x86.dll`）→ 成個 process crash（0xC0000005 → 0xC000041d）。Inno setup 係 32-bit → 裝 0.9.x 嗰陣 wizard 起 UI → 注入 → 閃退（「Preparing to Install」停住 ~18s 係 WER 寫 dump）。**呢個先係「部分程序注入失敗」嘅真正根因** — 唔係 load 唔到，係 load 咗但 crash 埋個 host。
+
+**已排除**：
+- installer/RM/`runasoriginaluser`/`postinstall` — 唔關事（裸 Inno mini-setup 都死，`/VERYSILENT` 冇 UI 反而唔死 → 證實係注入 path）
+- Defender exclusion — 冇效
+- `extern "system"` calling convention — 全部 callback 啱
+- `winsqlite3` import 名 — undecorated 正確綁定，`sqlite3_open_v2` 返回 0
+
+**收窄到嘅位置**：debug log 最後停喺 `db::open result=0`（`db.rs`）— 即係 `engine::prepare`/`memory.prepare`/`tray::activate` 段。但 inline 路徑冇嘢可以爆 → 疑係 stack corruption 或別 thread。
+
+**Dump 分析**（LocalDumps + 手寫 minidump parser）：
+- release crash：IAT `memcpy` slot（VCRUNTIME140，RVA 0xB30C4）俾人寫咗 heap ptr 0x07167018 → thunk jmp 爆
+- debug crash：EIP=「engine::prepare after open_default」**字串 literal 地址**（.rdata）— 跳咗去 data 執行，疑似 `ret`/indirect call 擸咗 arg 做 target → **stack imbalance / wild jump**
+- 兩個 dump 一致指向「跳去 data pointer」— 疑係：間接 call target 錯位、vtable slot 錯、或 callee ret N 令 `ret` 擸到 arg
+- stack 上有 `engine::prepare`（0x10090e10 範圍）+ landing pad frames — crash 喺 activation thread inline
+
+**調查工具**（都喺機上裝好）：
+- WER LocalDumps：`HKLM\...\LocalDumps\<exe-name>.tmp` → `%TEMP%\dumps\`（DumpType=2）
+- dump parser：`/tmp/dump*.ps1`（PowerShell + C# 手寫 minidump parser，攞 EIP/module/stack）
+- `llvm-objdump.exe`/`llvm-readobj.exe`/`llvm-nm.exe`：`rustup component add llvm-tools` 已裝，用嚟反匯編 + map offset
+- Debug x86 dll 已 deploy 喺 `C:\Program Files\R-Cantonese\r-cantonese-x86.dll`（release 改名 `r-cantonese-x86-rel.dll`）；log 有晒 breadcrumb
+- 重現：`C:\Users\shagg\AppData\Local\Temp\mini-setup.exe`（裸 Inno installer，零 code — 起 UI 即注入我哋個 dll）
+
+**下一步**：
+- processor.rs 有 `RCANTONESE_SKIP_ENGINE` debug gate（`processor.engine` skip）— 但 UAC 洗走 env var，要諗辦法傳入 elevated process（或者直接 hardcode skip 試）
+- 逐段二分：`setup_language_bar`/`engine`/`memory`/`tray::activate` 逐個 comment 試
+- 或者檢查 windows crate 0.62.2 嘅 i686 `#[implement]` vtable — shell call 我哋 COM method 時如果 vtable slot 錯位會直接跳入 data
+
 ## Workflow
 - **唔好主動 `git push`** — commit 照做，push 等用戶明確指示（減少 GitHub history 噪音）
 

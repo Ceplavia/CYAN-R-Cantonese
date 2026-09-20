@@ -84,18 +84,22 @@ pub fn activate(processor: &Weak<Mutex<Processor>>) {
         let mut tray = TRAY.lock().unwrap_or_else(|e| e.into_inner());
         tray.shutting_down = false;
         if tray.host_hwnd == 0 {
+                globals::log("tray: activate before create_host_window");
                 tray.host_hwnd = raw(create_host_window(processor.clone()));
+                globals::log("tray: activate after create_host_window");
         }
         // OnSetThreadFocus only fires on transitions — when the IME activates
         // on an already-focused thread (fresh app, user switches IME on) no
         // event ever arrives. GetForegroundWindow is unreliable here too —
         // the IME picker flyout can be foreground during activation — so ask
         // this thread's own GUI info whether it owns the keyboard focus.
+        globals::log("tray: activate before GetGUIThreadInfo");
         tray.has_thread_focus = unsafe {
                 let mut gui = GUITHREADINFO::default();
                 gui.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
                 GetGUIThreadInfo(GetCurrentThreadId(), &mut gui).is_ok() && !gui.hwndFocus.is_invalid()
         };
+        globals::log("tray: activate after GetGUIThreadInfo");
         globals::log(&format!("tray: activate focus={}", tray.has_thread_focus));
         if tray.has_thread_focus {
                 drop(tray);
