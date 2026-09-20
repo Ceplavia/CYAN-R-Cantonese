@@ -320,6 +320,9 @@ pub fn load() -> ImeSettings {
                                         }
                                 }
                         }
+                        "display_tray_icon" => {
+                                settings.display_tray_icon = matches!(value.trim(), "true" | "1" | "yes");
+                        }
                         _ => {}
                 }
         }
@@ -356,7 +359,8 @@ pub fn save(settings: &ImeSettings) -> std::io::Result<()> {
                  candidate_select_color = {}\n\
                  candidate_comment_color = {}\n\
                  options_menu_keys = [{}]\n\
-                 ui_language = {}\n",
+                 ui_language = {}\n\
+                 display_tray_icon = {}\n",
                 settings.version,
                 quote(input_method_mode_name(settings.input_method_mode)),
                 quote(character_form_name(settings.character_form)),
@@ -372,6 +376,7 @@ pub fn save(settings: &ImeSettings) -> std::io::Result<()> {
                 color_to_hex(settings.candidate_comment_color),
                 keys.join(", "),
                 quote(&settings.ui_language),
+                settings.display_tray_icon,
         );
         if let Err(e) = std::fs::write(&path, content) {
                 globals::log_error(&format!("config save failed: {e:?}"));

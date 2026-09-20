@@ -614,7 +614,7 @@ fn handle_composition_finalize(state: &mut ServiceState, ec: u32, context: &ITfC
 }
 
 /// Port of _HandleCompositionFinalizeRaw.
-fn handle_composition_finalize_raw(state: &mut ServiceState, ec: u32, context: &ITfContext) -> Result<()> {
+pub(crate) fn handle_composition_finalize_raw(state: &mut ServiceState, ec: u32, context: &ITfContext) -> Result<()> {
         let Some(processor) = state.processor.clone() else {
                 return Err(Error::from_hresult(S_FALSE));
         };

@@ -247,14 +247,21 @@ impl RCantoneseService_Impl {
 
                 // ITfThreadMgrEventSink
                 let self_sink: IUnknown = self.as_iunknown();
-                if let Ok(source) = thread_mgr.cast::<ITfSource>() {
-                        match unsafe { source.AdviseSink(&ITfThreadMgrEventSink::IID, &self_sink) } {
+                match thread_mgr.cast::<ITfSource>() {
+                        Ok(source) => match unsafe { source.AdviseSink(&ITfThreadMgrEventSink::IID, &self_sink) } {
                                 Ok(cookie) => state.thread_mgr_event_sink_cookie = cookie,
-                                Err(_) => {
+                                Err(e) => {
+                                        globals::log_error(&format!("ActivateEx: AdviseSink(ThreadMgrEvent) failed {e:?}"));
                                         drop(state);
                                         let _ = ITfTextInputProcessor_Impl::Deactivate(self);
                                         return Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)));
                                 }
+                        },
+                        Err(e) => {
+                                globals::log_error(&format!("ActivateEx: ITfSource cast failed {e:?}"));
+                                drop(state);
+                                let _ = ITfTextInputProcessor_Impl::Deactivate(self);
+                                return Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)));
                         }
                 }
 
@@ -275,11 +282,17 @@ impl RCantoneseService_Impl {
                 // key event sink
                 if let Ok(keystroke_mgr) = thread_mgr.cast::<ITfKeystrokeMgr>() {
                         let sink: ITfKeyEventSink = self_sink.cast().unwrap();
-                        if unsafe { keystroke_mgr.AdviseKeyEventSink(tid, &sink, true) }.is_err() {
+                        if let Err(e) = unsafe { keystroke_mgr.AdviseKeyEventSink(tid, &sink, true) } {
+                                globals::log_error(&format!("ActivateEx: AdviseKeyEventSink failed {e:?}"));
                                 drop(state);
                                 let _ = ITfTextInputProcessor_Impl::Deactivate(self);
                                 return Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)));
                         }
+                } else {
+                        globals::log_error("ActivateEx: ITfKeystrokeMgr cast failed");
+                        drop(state);
+                        let _ = ITfTextInputProcessor_Impl::Deactivate(self);
+                        return Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)));
                 }
 
                 // active language profile notify sink + thread focus sink
@@ -304,17 +317,27 @@ impl RCantoneseService_Impl {
                         }
                 }
 
-                // engine
-                if let Some(processor) = Processor::new(&thread_mgr, tid) {
-                        let processor = std::sync::Arc::new(Mutex::new(processor));
-                        if let Ok(p) = processor.lock() {
-                                if let Some(item) = &p.lang_bar {
-                                        *item.settings_handler.lock().unwrap_or_else(|e| e.into_inner()) =
-                                                Some(std::sync::Arc::downgrade(&processor));
+                // engine — a None here silently kills the IME for this
+                // process (no keys, no langbar, no tray), so it must be
+                // diagnosable in release builds.
+                match Processor::new(&thread_mgr, tid) {
+                        Some(processor) => {
+                                let processor = std::sync::Arc::new(Mutex::new(processor));
+                                if let Ok(p) = processor.lock() {
+                                        if let Some(item) = &p.lang_bar {
+                                                *item.settings_handler.lock().unwrap_or_else(|e| e.into_inner()) =
+                                                        Some(std::sync::Arc::downgrade(&processor));
+                                        }
                                 }
+                                crate::tray::activate(&std::sync::Arc::downgrade(&processor));
+                                state.processor = Some(processor);
                         }
-                        crate::tray::activate(&std::sync::Arc::downgrade(&processor));
-                        state.processor = Some(processor);
+                        None => {
+                                globals::log_error(&format!(
+                                        "ActivateEx: Processor::new failed in proc={}",
+                                        name.rsplit('\\').next().unwrap_or(&name)
+                                ));
+                        }
                 }
 
                 globals::log("ActivateEx success");
@@ -479,7 +502,28 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                         let (Some(processor), Some(thread_mgr)) = (state.processor.clone(), state.thread_mgr.clone()) else {
                                 return Ok(BOOL(0));
                         };
+                        // A mode switch mid-composition would leave the
+                        // composition dangling — later keys pass through raw
+                        // and Space lands as a literal space. Commit the raw
+                        // buffer first (async — never block a key dispatch).
+                        let finalize = if state.is_composing() {
+                                Some((state.self_iunknown.clone(), state.context.clone(), state.client_id))
+                        } else {
+                                None
+                        };
                         drop(state);
+                        if let Some((Some(svc), Some(ctx), client_id)) = finalize {
+                                let _ = crate::composition::request_edit_session(
+                                        &svc,
+                                        &ctx,
+                                        client_id,
+                                        windows::Win32::UI::TextServices::TF_ES_ASYNCDONTCARE
+                                                | windows::Win32::UI::TextServices::TF_ES_READWRITE,
+                                        Box::new(|state, ec, context| {
+                                                crate::keys::handle_composition_finalize_raw(state, ec, context)
+                                        }),
+                                );
+                        }
                         let eaten = processor
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())

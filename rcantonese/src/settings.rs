@@ -58,6 +58,10 @@ pub struct ImeSettings {
         pub candidate_comment_color: u32,
         /// UI language override: "auto" (system), "en", or "zh".
         pub ui_language: String,
+        /// Show the standalone tray icon (r-cantonese-tray.exe). Weasel-style:
+        /// off by default — the langbar item next to the input indicator is
+        /// the primary icon; the tray icon only surfaces for balloons.
+        pub display_tray_icon: bool,
 }
 
 impl Default for ImeSettings {
@@ -78,6 +82,7 @@ impl Default for ImeSettings {
                         candidate_select_color: 0x00F0D8B0,
                         candidate_comment_color: 0x00606060,
                         ui_language: "auto".into(),
+                        display_tray_icon: false,
                 }
         }
 }

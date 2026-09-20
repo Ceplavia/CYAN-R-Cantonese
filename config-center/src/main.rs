@@ -219,6 +219,7 @@ struct ConfigCenter {
         select_color: String,
         comment_color: String,
         hotkeys: String,
+        tray_icon: bool,
         status: String,
 }
 
@@ -248,6 +249,7 @@ impl ConfigCenter {
                                 .map(|&(vk, m)| config::hotkey_to_spec(vk, m))
                                 .collect::<Vec<_>>()
                                 .join(", "),
+                        tray_icon: s.display_tray_icon,
                         status: String::new(),
                 }
         }
@@ -281,6 +283,7 @@ impl ConfigCenter {
                         s.options_menu_keys = keys;
                 }
                 s.ui_language = ["auto", "en", "zh"][self.ui_lang].to_string();
+                s.display_tray_icon = self.tray_icon;
                 s
         }
 
@@ -395,6 +398,7 @@ enum Msg {
         Hotkeys(String),
         StartCapture,
         CaptureDone,
+        TrayIcon(bool),
 }
 
 impl Component for ConfigCenter {
@@ -452,6 +456,7 @@ impl Component for ConfigCenter {
                                 self.select_color = config::color_to_hex(d.candidate_select_color);
                                 self.comment_color = config::color_to_hex(d.candidate_comment_color);
                         }
+                        Msg::TrayIcon(v) => self.tray_icon = v,
                         Msg::Hotkeys(s) => self.hotkeys = s,
                         Msg::StartCapture => {
                                 self.capturing = true;
@@ -633,6 +638,21 @@ impl Component for ConfigCenter {
                                         TextBlock::new().text_wrapping(TextWrapping::Wrap).text(self.t(
                                                 "Switching unregisters the old profile first. Requires administrator rights.",
                                                 "切換語言會先取消註冊舊 profile，再註冊新嘅。需要管理員權限。",
+                                        )),
+                                        StackPanel::new()
+                                                .orientation(Orientation::Horizontal)
+                                                .spacing(8.0)
+                                                .children((
+                                                        label(&self.t("Tray icon", "托盤圖標")),
+                                                        View::from(
+                                                                ToggleSwitch::new()
+                                                                        .is_on(self.tray_icon)
+                                                                        .on_toggled(context.callback(Msg::TrayIcon)),
+                                                        ),
+                                                )),
+                                        TextBlock::new().text_wrapping(TextWrapping::Wrap).text(self.t(
+                                                "Off by default — the 中/A button beside the input-mode indicator is the main icon. Turn on for an extra standalone tray icon.",
+                                                "默認關閉 — 輸入法圖標隔籬嘅「中/A」掣先係主圖標。開咗會多個獨立托盤圖標。",
                                         )),
                                         Button::new().on_click(context.message(Msg::ClearMemory)).content(self.t("Clear learning records", "清除學習記錄")),
                                         TextBlock::new().text_wrapping(TextWrapping::Wrap).text(self.t(

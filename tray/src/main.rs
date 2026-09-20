@@ -53,6 +53,13 @@ struct State {
         /// area — NIF_INFO needs the icon to exist, so they're queued and
         /// flushed when it gets added.
         pending_balloons: Vec<String>,
+        /// `display_tray_icon` from settings.toml — Weasel-style default off:
+        /// the langbar item beside the input indicator is the primary icon,
+        /// this one only surfaces for balloons unless the user opts in.
+        display_tray_icon: bool,
+        /// While set (and in the future) the icon stays up to display a
+        /// balloon even when `display_tray_icon` is off.
+        balloon_until: Option<std::time::Instant>,
 }
 
 static STATE: std::sync::LazyLock<Mutex<State>> = std::sync::LazyLock::new(|| {
@@ -62,8 +69,33 @@ static STATE: std::sync::LazyLock<Mutex<State>> = std::sync::LazyLock::new(|| {
                 icon_added: false,
                 mode_is_zh: true,
                 pending_balloons: Vec::new(),
+                display_tray_icon: read_display_tray_icon(),
+                balloon_until: None,
         })
 });
+
+/// Read `display_tray_icon` straight from settings.toml — the tray exe has
+/// no TOML dep, so it's a plain key scan of the flat file.
+fn read_display_tray_icon() -> bool {
+        let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+                return false;
+        };
+        let path = std::path::PathBuf::from(base)
+                .join("RCantonese")
+                .join("settings.toml");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+                return false;
+        };
+        for line in content.lines() {
+                let line = line.split('#').next().unwrap_or("").trim();
+                if let Some((key, value)) = line.split_once('=') {
+                        if key.trim() == "display_tray_icon" {
+                                return matches!(value.trim(), "true" | "1" | "yes");
+                        }
+                }
+        }
+        false
+}
 
 /// Image name of a pid's process — tells a real tray.exe window apart from
 /// a stale in-process worker left by an older injected DLL build.
@@ -181,7 +213,11 @@ fn log_error(s: &str) {
 }
 
 fn write_log(s: &str) {
-        let dir = std::env::temp_dir().join("RCantonese").join("Logs");
+        // Same file the injected DLL writes — %LOCALAPPDATA%\RCantonese\Logs.
+        let base = std::env::var_os("LOCALAPPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join("RCantonese").join("Logs");
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("RCantonese.log")) {
                 use std::io::Write;
@@ -203,8 +239,16 @@ fn pid_alive(pid: u32) -> bool {
 
 fn refresh_icon(hwnd: HWND) {
         let (visible, is_zh) = {
-                let s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-                (!s.pids.is_empty(), s.mode_is_zh)
+                let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+                // The icon is needed while the IME is active and the user
+                // opted in — or while a balloon is queued/showing (NIF_INFO
+                // requires the icon to exist). Weasel does the same for its
+                // deploy notifications.
+                if s.balloon_until.is_some_and(|t| t <= std::time::Instant::now()) {
+                        s.balloon_until = None;
+                }
+                let balloon_active = !s.pending_balloons.is_empty() || s.balloon_until.is_some();
+                ((!s.pids.is_empty() && s.display_tray_icon) || balloon_active, s.mode_is_zh)
         };
         let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if visible && !st.icon_added {
@@ -310,9 +354,9 @@ fn queue_first_run_hint() {
                 return;
         }
         let text = if is_chinese_ui() {
-                "圖標喺通知區（^）入面 — 拖出嚟就可以常駐顯示"
+                "圖標喺輸入法圖標隔籬 — 左撳切換中/英，右撳開設定"
         } else {
-                "The icon lives in the notification overflow (^) — drag it out to keep it visible"
+                "The icon sits beside the input-mode indicator — left-click toggles 中/A, right-click opens settings"
         };
         STATE.lock().unwrap_or_else(|e| e.into_inner()).pending_balloons.push(text.to_string());
 }
@@ -331,6 +375,17 @@ fn show_balloon_text(hwnd: HWND, text: &str) {
                 data.Anonymous.uTimeout = 3000;
                 let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
         }
+        mark_balloon_shown();
+}
+
+/// Keep the icon alive long enough for the balloon to be seen — the next
+/// refresh_icon after the deadline hides it again when the user hasn't
+/// opted into a permanent tray icon.
+fn mark_balloon_shown() {
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if !st.display_tray_icon {
+                st.balloon_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        }
 }
 
 fn show_balloon(hwnd: HWND, kind: usize) {
@@ -346,6 +401,8 @@ fn show_balloon(hwnd: HWND, kind: usize) {
                 let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if !st.icon_added {
                         st.pending_balloons.push(text.to_string());
+                        drop(st);
+                        refresh_icon(hwnd);
                         return;
                 }
         }
@@ -360,6 +417,7 @@ fn show_balloon(hwnd: HWND, kind: usize) {
                 data.Anonymous.uTimeout = 3000;
                 let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
         }
+        mark_balloon_shown();
 }
 
 /// Post a message to every IME host window; returns how many were found.
@@ -516,6 +574,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                 LRESULT(0)
                         }
                         WM_TRAY_NOTIFY => {
+                                // Settings may have changed (apply broadcast
+                                // precedes this) — re-read the icon flag.
+                                STATE.lock().unwrap_or_else(|e| e.into_inner()).display_tray_icon =
+                                        read_display_tray_icon();
                                 show_balloon(hwnd, wparam.0);
                                 LRESULT(0)
                         }
@@ -540,8 +602,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                                                 show_balloon_text(hwnd, &text);
                                                         } else {
                                                                 // Icon not up yet — queue it; refresh_icon
-                                                                // flushes once the icon is added.
+                                                                // adds the icon (balloon pending) then
+                                                                // flushes the queue.
                                                                 st.pending_balloons.push(text);
+                                                                drop(st);
+                                                                refresh_icon(hwnd);
                                                         }
                                                 }
                                         }
@@ -550,6 +615,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         }
                         WM_TRAY_PING => LRESULT(TRAY_MAGIC),
                         WM_TRAY_UPDATE => {
+                                STATE.lock().unwrap_or_else(|e| e.into_inner()).display_tray_icon =
+                                        read_display_tray_icon();
                                 refresh_icon(hwnd);
                                 LRESULT(0)
                         }

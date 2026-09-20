@@ -1,4 +1,20 @@
 
+## 架構筆記（2026-09-20 更新）
+
+### Log
+- 路徑 `%LOCALAPPDATA%\RCantonese\Logs\RCantonese.log`（同 settings.toml 一齊）
+- release build 淨係寫 `log_error`；`log` 係 debug-only
+
+### Shift / preserved key
+- `OnPreservedKey` 時仲 compose 緊 → 先 queue async edit session commit raw input，先至 flip compartment（唔做嘅話 composition 吊喺度，之後撳 space 會出真空格）
+- langbar compartment sink `OnChange` **唔可以掂 TSF**（SetValue broadcast 入面 call `OnUpdate`/`GetValue` 會喺某啲 app 死鎖）— 只係 `PostMessage` 去 per-thread message-only window（`RCantoneseRefreshWnd`），`langbar::deferred_refresh` 先至做 `notify_update` + `tray::update_mode`
+
+### Tray icon（Weasel 式）
+- langbar item（`TF_LBI_STYLE_SHOWNINTRAY`）= 輸入法圖標隔籬嘅「中/A」— 主圖標，左撳 toggle、右撳 InitMenu
+- `r-cantonese-tray.exe` 仲係 message router + balloon host，但 icon 默認收埋（`display_tray_icon = true` 先常駐）
+- balloon 要 icon 先彈到 — `balloon_until` 臨時頂起 icon 10s，prune timer 到期自動收
+- config-center 有「托盤圖標」ToggleSwitch
+
 ## 已知問題（2026-09-19 記錄）
 
 ### Tray icon 唔穩定

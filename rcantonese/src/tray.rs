@@ -36,6 +36,7 @@ const WM_TRAY_CLEARMEM: u32 = WM_APP + 47; // host windows: delete all learned w
 const WM_TRAY_PING: u32 = WM_APP + 48; // liveness probe — returns TRAY_MAGIC
 const WM_TRAY_SHOW: u32 = WM_APP + 50; // wParam = pid — IME active+foreground
 const WM_TRAY_HIDE: u32 = WM_APP + 51; // wParam = pid — IME no longer current
+const WM_LANGBAR_REFRESH: u32 = WM_APP + 52; // host windows: deferred langbar icon refresh
 const TRAY_MAGIC: isize = 0x5243; // 'RC'
 
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
@@ -139,6 +140,70 @@ pub fn thread_focus_lost() {
         globals::log("tray: focus lost");
         drop(tray);
         hide_tray_icon();
+}
+
+/// Called from the langbar's compartment sink OnChange — which fires inside
+/// ITfCompartment::SetValue's synchronous broadcast. Touching TSF there
+/// (OnUpdate → GetIcon → GetValue) deadlocks some apps, so the work is
+/// deferred to a per-thread message-only window: it runs back on the same
+/// thread (COM objects stay in their apartment) once SetValue returns.
+pub fn post_langbar_refresh(item_ptr: usize) {
+        let target = REFRESH_HWND.with(|h| {
+                if h.get() == 0 {
+                        h.set(raw(create_refresh_window()));
+                }
+                h.get()
+        });
+        if target != 0 {
+                unsafe {
+                        let _ = PostMessageW(Some(hwnd(target)), WM_LANGBAR_REFRESH, WPARAM(item_ptr), LPARAM(0));
+                }
+        }
+}
+
+thread_local! {
+        static REFRESH_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+const REFRESH_WND_CLASS: PCWSTR = w!("RCantoneseRefreshWnd");
+
+fn create_refresh_window() -> HWND {
+        unsafe {
+                let instance: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+                let mut wc = WNDCLASSEXW::default();
+                wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
+                wc.lpfnWndProc = Some(refresh_wnd_proc);
+                wc.hInstance = instance;
+                wc.lpszClassName = REFRESH_WND_CLASS;
+                let _ = RegisterClassExW(&wc);
+                CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        REFRESH_WND_CLASS,
+                        PCWSTR::null(),
+                        WS_POPUP,
+                        0,
+                        0,
+                        0,
+                        0,
+                        Some(HWND_MESSAGE),
+                        None,
+                        Some(instance),
+                        None,
+                )
+                .unwrap_or_default()
+        }
+}
+
+unsafe extern "system" fn refresh_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        unsafe {
+                if msg == WM_LANGBAR_REFRESH {
+                        return globals::guarded_value("langbar refresh", LRESULT(0), || {
+                                crate::langbar::deferred_refresh(wparam.0);
+                                LRESULT(0)
+                        });
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
 }
 
 /// Update the tray icon's zh/abc state. Finds the tray window by class and
@@ -364,6 +429,8 @@ fn create_host_window(processor: Weak<Mutex<Processor>>) -> HWND {
                 if !hwnd.is_invalid() {
                         let weak = Box::new(processor);
                         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(weak) as isize);
+                } else {
+                        globals::log_error("tray: host window creation failed — tray menu/clicks unavailable");
                 }
                 hwnd
         }

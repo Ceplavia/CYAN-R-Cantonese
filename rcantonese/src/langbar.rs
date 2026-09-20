@@ -298,6 +298,32 @@ impl ITfCompartmentEventSink_Impl for CompartmentEventSink_Impl {
 }
 
 // ---------------------------------------------------------------------
+// Deferred refresh — the compartment sink fires inside
+// ITfCompartment::SetValue's synchronous broadcast, where calling back
+// into TSF (OnUpdate → GetIcon → GetValue) deadlocks some apps. The sink
+// only posts the item pointer to the process host window; this function
+// runs later on that window's message loop, after the broadcast settles.
+// ---------------------------------------------------------------------
+
+static REFRESH_ITEMS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Runs on the host window's thread — safe to talk to TSF again.
+pub fn deferred_refresh(item_ptr: usize) {
+        let items = REFRESH_ITEMS.lock().unwrap_or_else(|e| e.into_inner());
+        if !items.contains(&item_ptr) {
+                return;
+        }
+        let item = unsafe { &*(item_ptr as *const LangBarItem) };
+        item.notify_update(TF_LBI_ICON | TF_LBI_STATUS);
+        // Mirror the new mode onto the tray icon.
+        if let Some(compartment) = item.compartment() {
+                if let Ok(is_open) = compartment.get_bool() {
+                        crate::tray::update_mode(is_open);
+                }
+        }
+}
+
+// ---------------------------------------------------------------------
 // LangBarItem — port of CLangBarItemButton.
 // ---------------------------------------------------------------------
 
@@ -400,6 +426,8 @@ impl LangBarItem {
 
         /// Unadvise the compartment event sink — port of _UnregisterCompartment.
         pub fn unadvise_compartment_sink(this: &ComObject<LangBarItem>) {
+                let ptr = this.get() as *const LangBarItem as usize;
+                REFRESH_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).retain(|&p| p != ptr);
                 let this = this.get();
                 let cookie = this.compartment_sink_cookie.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let source = this.compartment_source.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -433,22 +461,20 @@ impl LangBarItem {
                 *this.get().compartment.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(crate::compartment::Compartment::new(&thread_unknown, client_id, guid));
 
-                // Safe while the COM object is alive — TSF holds a reference through the sink.
+                // Safe while the COM object is alive — TSF holds a reference
+                // through the sink, and REFRESH_ITEMS drops the pointer on
+                // unadvise before the item can be freed.
                 let this_ptr = this.get() as *const LangBarItem as usize;
                 let sink_obj: ITfCompartmentEventSink = CompartmentEventSink::new(move |_| {
-                        let item = unsafe { &*(this_ptr as *const LangBarItem) };
-                        item.notify_update(TF_LBI_ICON | TF_LBI_STATUS);
-                        // Mirror the new mode onto the tray icon — the sink's
-                        // callback is what fires on Shift toggles.
-                        if let Some(compartment) = item.compartment() {
-                                if let Ok(is_open) = compartment.get_bool() {
-                                        crate::tray::update_mode(is_open);
-                                }
-                        }
+                        // Never touch TSF in here — OnChange runs inside the
+                        // SetValue broadcast and re-entering deadlocks some
+                        // apps. Defer the icon refresh to the host window.
+                        crate::tray::post_langbar_refresh(this_ptr);
                 })
                 .into();
                 match CompartmentEventSink::advise(&sink_obj, &thread_unknown, &guid) {
                         Ok((cookie, source)) => {
+                                REFRESH_ITEMS.lock().unwrap_or_else(|e| e.into_inner()).push(this_ptr);
                                 *this.get().compartment_sink_cookie.lock().unwrap_or_else(|e| e.into_inner()) = cookie;
                                 *this.get().compartment_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(source);
                                 *this.get().compartment_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink_obj);

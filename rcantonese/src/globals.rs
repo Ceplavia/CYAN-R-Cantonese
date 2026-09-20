@@ -159,11 +159,15 @@ pub fn default_database_path() -> std::path::PathBuf {
         }
 }
 
-/// File log path — %TEMP%\RCantonese\Logs\RCantonese.log (mirrors upstream Logger.cpp).
+/// File log path — %LOCALAPPDATA%\RCantonese\Logs\RCantonese.log, beside
+/// settings.toml and memory.sqlite3 so failures are easy to find.
 pub fn log_file_path() -> Option<std::path::PathBuf> {
         static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
         PATH.get_or_init(|| {
-                let dir = std::env::temp_dir().join("RCantonese").join("Logs");
+                let base = std::env::var_os("LOCALAPPDATA")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(std::env::temp_dir);
+                let dir = base.join("RCantonese").join("Logs");
                 if std::fs::create_dir_all(&dir).is_err() {
                         return None;
                 }
