@@ -2,7 +2,7 @@
 ; Build: ISCC.exe installer.iss  (expects release binaries in target\release)
 
 #define AppName "R-Cantonese"
-#define AppVersion "0.9.1"
+#define AppVersion "0.9.2"
 #define AppPublisher "R-Cantonese Project"
 ; Fixed AppId → in-place upgrades detect the existing install.
 #define AppId "{{8F2C4E6A-3B71-4D9A-9E5F-7C1A2B3D4E5F}"
