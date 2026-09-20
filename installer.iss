@@ -37,6 +37,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; The IME DLL may be loaded in injected processes — restartreplace queues
 ; the new image for the next reboot instead of failing the copy.
 Source: "target\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese.dll"; Flags: restartreplace ignoreversion
+; 32-bit twin — 32-bit processes can't load a 64-bit COM dll (this is why
+; injection "failed" in some apps: they were x86). Registered via SysWOW64
+; regsvr32 → WOW6432Node.
+Source: "target\i686-pc-windows-msvc\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese-x86.dll"; Flags: restartreplace ignoreversion
 Source: "target\release\r-cantonese-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "target\release\config-center.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "rcantonese\ime.sqlite3"; DestDir: "{app}"; Flags: ignoreversion
@@ -62,6 +66,8 @@ Source: "target\release\zh-CN\*"; DestDir: "{app}\zh-CN"; Flags: ignoreversion s
 ; Register the IME (CLSID + TSF profile + categories + InstallLayoutOrTip
 ; enable + tray autostart Run key — all inside DllRegisterServer).
 Filename: "regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese..."
+; 32-bit view of regsvr32 → writes WOW6432Node CLSID + TIP for x86 apps.
+Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese (32-bit)..."
 ; Tray host starts now (un-elevated, as the installing user) and at login.
 Filename: "{app}\r-cantonese-tray.exe"; Flags: runasoriginaluser nowait
 ; Config center opens at the end so the user can tweak or just close it.
@@ -70,6 +76,7 @@ Filename: "{app}\config-center.exe"; Flags: runasoriginaluser nowait skipifsilen
 [UninstallRun]
 ; Before files are deleted: unregister the IME (drops the input tip, the
 ; TSF profile, the CLSID entry and the tray autostart value).
+Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s /u ""{app}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterIME32"
 Filename: "regsvr32.exe"; Parameters: "/s /u ""{app}\r-cantonese.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterIME"
 
 [Code]

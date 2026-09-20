@@ -10,10 +10,17 @@
 - langbar compartment sink `OnChange` **唔可以掂 TSF**（SetValue broadcast 入面 call `OnUpdate`/`GetValue` 會喺某啲 app 死鎖）— 只係 `PostMessage` 去 per-thread message-only window（`RCantoneseRefreshWnd`），`langbar::deferred_refresh` 先至做 `notify_update` + `tray::update_mode`
 
 ### Tray icon（Weasel 式）
-- langbar item（`TF_LBI_STYLE_SHOWNINTRAY`）= 輸入法圖標隔籬嘅「中/A」— 主圖標，左撳 toggle、右撳 InitMenu
+- langbar item 用 **`GUID_LBI_INPUTMODE`**（保留 GUID）+ `TF_LBI_STYLE_SHOWNINTRAY` = 輸入法圖標隔籬嘅「中/A」— 主圖標，左撳 toggle、右撳 InitMenu。自訂 GUID 註冊到但 Win8+ 唔會 render
 - `r-cantonese-tray.exe` 仲係 message router + balloon host，但 icon 默認收埋（`display_tray_icon = true` 先常駐）
 - balloon 要 icon 先彈到 — `balloon_until` 臨時頂起 icon 10s，prune timer 到期自動收
 - config-center 有「托盤圖標」ToggleSwitch
+
+### 32-bit 程序
+- `r-cantonese.dll` 係 x64 — 32-bit app 物理上 load 唔到（「注入失敗切唔到」嘅元兇）
+- i686 build：`cargo build --release -p r-cantonese --target i686-pc-windows-msvc` → `target\i686-pc-windows-msvc\release\r_cantonese.dll`
+- 註冊：`C:\Windows\SysWOW64\regsvr32.exe /s r-cantonese-x86.dll` → CLSID 入 WOW6432Node
+- `winsqlite3` 用 `kind = "raw-dylib"` — 唔使 SDK import lib
+- installer 包 `r-cantonese-x86.dll`，uninstall 用 SysWOW64 regsvr32 /u
 
 ## 已知問題（2026-09-19 記錄）
 

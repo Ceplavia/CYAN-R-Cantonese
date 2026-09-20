@@ -27,7 +27,9 @@ struct Sqlite3Statement {
         _private: [u8; 0],
 }
 
-#[link(name = "winsqlite3")]
+// raw-dylib: rustc generates the import stubs itself — no winsqlite3.lib
+// needed, which keeps the i686 build working without SDK lib paths.
+#[link(name = "winsqlite3", kind = "raw-dylib")]
 unsafe extern "C" {
         fn sqlite3_open_v2(filename: *const c_char, database: *mut *mut Sqlite3, flags: c_int, vfs: *const c_char) -> c_int;
         fn sqlite3_close_v2(database: *mut Sqlite3) -> c_int;

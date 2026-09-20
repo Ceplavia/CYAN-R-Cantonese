@@ -428,7 +428,9 @@ fn create_host_window(processor: Weak<Mutex<Processor>>) -> HWND {
                 let hwnd = hwnd.unwrap_or_default();
                 if !hwnd.is_invalid() {
                         let weak = Box::new(processor);
-                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(weak) as isize);
+                        // `as _`: SetWindowLongPtrW takes isize on x64 but
+                        // i32 on x86.
+                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(weak) as _);
                 } else {
                         globals::log_error("tray: host window creation failed — tray menu/clicks unavailable");
                 }

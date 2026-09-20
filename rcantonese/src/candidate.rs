@@ -252,7 +252,9 @@ impl CandidateWindow {
                                 // when the window is destroyed.
                                 let ptr = std::sync::Arc::into_raw(window.state.clone());
                                 unsafe {
-                                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+                                        // `as _`: SetWindowLongPtrW takes isize
+                                        // on x64 but i32 on x86.
+                                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as _);
                                 }
                                 Some(window)
                         }
