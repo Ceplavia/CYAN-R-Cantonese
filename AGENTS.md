@@ -28,6 +28,9 @@
 - `winsqlite3` 用 `kind = "raw-dylib"` — 唔使 SDK import lib
 - installer 包 `r-cantonese-x86.dll`，uninstall 用 SysWOW64 regsvr32 /u
 
+## Workflow
+- **唔好主動 `git push`** — commit 照做，push 等用戶明確指示（減少 GitHub history 噪音）
+
 ## 已知問題（2026-09-19 記錄）
 
 ### Tray icon 唔穩定
