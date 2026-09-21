@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["preparing", "rcantonese", "config-center", "tray"]
+members = ["preparing", "rcantonese", "config-center", "tray", "repro32"]
 
 [profile.release]
 lto = true

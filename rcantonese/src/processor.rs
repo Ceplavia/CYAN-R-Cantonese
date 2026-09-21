@@ -135,13 +135,29 @@ impl Processor {
                 };
 
                 let _thread_unknown: IUnknown = thread_mgr.cast().ok()?;
+                let skip = |name: &str| cfg!(debug_assertions) && std::env::var(name).is_ok();
                 processor.is_applying_settings = true;
-                processor.apply_settings_to_compartments(thread_mgr);
+                if skip("RCANTONESE_SKIP_COMPARTMENTS") {
+                        crate::globals::log("Processor::new compartments skipped");
+                } else {
+                        processor.apply_settings_to_compartments(thread_mgr);
+                }
                 processor.is_applying_settings = false;
+                crate::globals::log("Processor::new after compartments");
 
                 processor.keys.set_candidate_list_range(processor.settings.candidate_page_size);
-                processor.setup_preserved(thread_mgr);
-                processor.setup_language_bar(thread_mgr, false);
+                if skip("RCANTONESE_SKIP_PRESERVED") {
+                        crate::globals::log("Processor::new preserved skipped");
+                } else {
+                        processor.setup_preserved(thread_mgr);
+                }
+                crate::globals::log("Processor::new after preserved");
+                if skip("RCANTONESE_SKIP_LANGBAR") {
+                        crate::globals::log("Processor::new langbar skipped");
+                } else {
+                        processor.setup_language_bar(thread_mgr, false);
+                }
+                crate::globals::log("Processor::new after langbar");
                 if cfg!(debug_assertions) && std::env::var("RCANTONESE_SKIP_ENGINE").is_err() {
                         processor.engine = CoreImeEngine::prepare();
                 } else {
@@ -152,9 +168,15 @@ impl Processor {
                         processor.engine.is_some(),
                         crate::globals::default_database_path().display()
                 ));
-                if let Ok(mut memory) = processor.memory.lock() {
+                crate::globals::log("Processor::new before memory.lock");
+                if skip("RCANTONESE_SKIP_MEMORY") {
+                        crate::globals::log("Processor::new memory skipped");
+                } else if let Ok(mut memory) = processor.memory.lock() {
+                        crate::globals::log("Processor::new before memory.prepare");
                         memory.prepare();
+                        crate::globals::log("Processor::new after memory.prepare");
                 }
+                crate::globals::log("Processor::new done");
                 Some(processor)
         }
 

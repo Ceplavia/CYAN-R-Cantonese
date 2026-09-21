@@ -284,15 +284,22 @@ impl RCantoneseService_Impl {
                         let sink: ITfKeyEventSink = self_sink.cast().unwrap();
                         if let Err(e) = unsafe { keystroke_mgr.AdviseKeyEventSink(tid, &sink, true) } {
                                 globals::log_error(&format!("ActivateEx: AdviseKeyEventSink failed {e:?}"));
+                                // Debug-only: synthetic hosts (repro32) can't advise
+                                // keystroke sinks — continue so the rest of activation
+                                // still runs for crash bisection.
+                                if !cfg!(debug_assertions) {
+                                        drop(state);
+                                        let _ = ITfTextInputProcessor_Impl::Deactivate(self);
+                                        return Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)));
+                                }
+                        }
+                } else {
+                        globals::log_error("ActivateEx: ITfKeystrokeMgr cast failed");
+                        if !cfg!(debug_assertions) {
                                 drop(state);
                                 let _ = ITfTextInputProcessor_Impl::Deactivate(self);
                                 return Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)));
                         }
-                } else {
-                        globals::log_error("ActivateEx: ITfKeystrokeMgr cast failed");
-                        drop(state);
-                        let _ = ITfTextInputProcessor_Impl::Deactivate(self);
-                        return Err(Error::from_hresult(HRESULT(0x80004005u32 as i32)));
                 }
 
                 // active language profile notify sink + thread focus sink
@@ -329,7 +336,11 @@ impl RCantoneseService_Impl {
                                                         Some(std::sync::Arc::downgrade(&processor));
                                         }
                                 }
-                                crate::tray::activate(&std::sync::Arc::downgrade(&processor));
+                                if cfg!(debug_assertions) && std::env::var("RCANTONESE_SKIP_TRAY").is_ok() {
+                                        globals::log("ActivateEx: tray skipped");
+                                } else {
+                                        crate::tray::activate(&std::sync::Arc::downgrade(&processor));
+                                }
                                 state.processor = Some(processor);
                         }
                         None => {

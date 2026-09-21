@@ -28,34 +28,32 @@
 - `winsqlite3` 用 `kind = "raw-dylib"` — 唔使 SDK import lib
 - installer 包 `r-cantonese-x86.dll`，uninstall 用 SysWOW64 regsvr32 /u
 
-### ⚠️ x86 DLL 注入會 crash host — 調查中（2026-09-20 深夜）
-**病徵**：任何 32-bit process 激活 IME（TSF inject `r-cantonese-x86.dll`）→ 成個 process crash（0xC0000005 → 0xC000041d）。Inno setup 係 32-bit → 裝 0.9.x 嗰陣 wizard 起 UI → 注入 → 閃退（「Preparing to Install」停住 ~18s 係 WER 寫 dump）。**呢個先係「部分程序注入失敗」嘅真正根因** — 唔係 load 唔到，係 load 咗但 crash 埋個 host。
+### ✅ x86 crash 已修（2026-09-21）— winsqlite3 stdcall
+**根因**：Microsoft 嘅 `winsqlite3.dll` 喺 x86 係用 `/Gz` 編 — **全部 export 係 stdcall**（`retl $N` callee-clean）。我哋 `db.rs` declare 做 `extern "C"`（cdecl）→ 每次 call：callee 清 args + caller 又清一次 → ESP 向上漂移 → `ret` 擸到垃圾地址亂跳（解釋晒跳字串/heap/null EIP）。x64 得一款 convention 所以冇事。
 
-**已排除**：
-- installer/RM/`runasoriginaluser`/`postinstall` — 唔關事（裸 Inno mini-setup 都死，`/VERYSILENT` 冇 UI 反而唔死 → 證實係注入 path）
-- Defender exclusion — 冇效
-- `extern "system"` calling convention — 全部 callback 啱
-- `winsqlite3` import 名 — undecorated 正確綁定，`sqlite3_open_v2` 返回 0
+**修法**（`db.rs`）：
+```rust
+#[cfg_attr(target_arch = "x86", link(name = "winsqlite3", kind = "raw-dylib", import_name_type = "undecorated"))]
+#[cfg_attr(not(target_arch = "x86"), link(name = "winsqlite3", kind = "raw-dylib"))]
+unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
+```
+- `extern "system"` 唔係 `extern "C"` — 因為 winsqlite3 係 stdcall
+- `import_name_type = "undecorated"` — winsqlite3 有 .def，export 名係 plain `sqlite3_*` 唔係 `_name@N`
+- `import_name_type` attribute 淨係 x86 接受 → 要 `cfg_attr` 分開兩個 arch
+- callback 都要 `extern "system"`（sqlite 內部都係 stdcall call 我哋）
 
-**收窄到嘅位置**：debug log 最後停喺 `db::open result=0`（`db.rs`）— 即係 `engine::prepare`/`memory.prepare`/`tray::activate` 段。但 inline 路徑冇嘢可以爆 → 疑係 stack corruption 或別 thread。
+**repro32 測試工具**（`repro32/` workspace member）：
+- 32-bit TSF host — CoCreateInstance + ActivateEx + CreateDocumentMgr/Push 行成個注入路徑，唔使 UAC 唔使真 app
+- VEH 內置 minidump + StackWalk64 + module scan
+- `REPRO32_NOTHING` / `REPRO32_SQLITE_ONLY` env 做隔離測試
+- HKCU per-user CLSID shadow（32-bit reg.exe 寫嘅 `HKCU\Software\Classes\CLSID\{...}\InProcServer32`）指去 dev dll → 迭代唔使郁 Program Files
 
-**Dump 分析**（LocalDumps + 手寫 minidump parser）：
-- release crash：IAT `memcpy` slot（VCRUNTIME140，RVA 0xB30C4）俾人寫咗 heap ptr 0x07167018 → thunk jmp 爆
-- debug crash：EIP=「engine::prepare after open_default」**字串 literal 地址**（.rdata）— 跳咗去 data 執行，疑似 `ret`/indirect call 擸咗 arg 做 target → **stack imbalance / wild jump**
-- 兩個 dump 一致指向「跳去 data pointer」— 疑係：間接 call target 錯位、vtable slot 錯、或 callee ret N 令 `ret` 擸到 arg
-- stack 上有 `engine::prepare`（0x10090e10 範圍）+ landing pad frames — crash 喺 activation thread inline
+**Debug gates**（debug-only，release 唔會生效）：
+- `RCANTONESE_SKIP_ENGINE`/`_MEMORY`/`_TRAY`/`_COMPARTMENTS`/`_PRESERVED`/`_LANGBAR` env — 二分用
+- `AdviseKeyEventSink` 失敗喺 debug build 唔會 early-return（synthetic host 冇真 input queue）
 
-**調查工具**（都喺機上裝好）：
-- WER LocalDumps：`HKLM\...\LocalDumps\<exe-name>.tmp` → `%TEMP%\dumps\`（DumpType=2）
-- dump parser：`/tmp/dump*.ps1`（PowerShell + C# 手寫 minidump parser，攞 EIP/module/stack）
-- `llvm-objdump.exe`/`llvm-readobj.exe`/`llvm-nm.exe`：`rustup component add llvm-tools` 已裝，用嚟反匯編 + map offset
-- Debug x86 dll 已 deploy 喺 `C:\Program Files\R-Cantonese\r-cantonese-x86.dll`（release 改名 `r-cantonese-x86-rel.dll`）；log 有晒 breadcrumb
-- 重現：`C:\Users\shagg\AppData\Local\Temp\mini-setup.exe`（裸 Inno installer，零 code — 起 UI 即注入我哋個 dll）
-
-**下一步**：
-- processor.rs 有 `RCANTONESE_SKIP_ENGINE` debug gate（`processor.engine` skip）— 但 UAC 洗走 env var，要諗辦法傳入 elevated process（或者直接 hardcode skip 試）
-- 逐段二分：`setup_language_bar`/`engine`/`memory`/`tray::activate` 逐個 comment 試
-- 或者檢查 windows crate 0.62.2 嘅 i686 `#[implement]` vtable — shell call 我哋 COM method 時如果 vtable slot 錯位會直接跳入 data
+**⚠️ 機器狀態**：HKCU shadow 仲喺度，指去 `%LOCALAPPDATA%\RCantonese\r-cantonese-x86.dll`（fixed release copy）— 裝咗新 installer 之後可以刪：
+`C:\Windows\SysWOW64\reg.exe delete "HKCU\Software\Classes\CLSID\{D2291A80-84D8-4641-9AB2-BDD1472C846B}" /f`
 
 ## Workflow
 - **唔好主動 `git push`** — commit 照做，push 等用戶明確指示（減少 GitHub history 噪音）

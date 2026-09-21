@@ -169,24 +169,29 @@ impl InputMemory {
         }
 
         pub fn prepare(&mut self) -> bool {
+                globals::log("mem::prepare enter");
                 self.database = None;
                 let Some(directory) = user_data_directory() else {
                         globals::log("InputMemory: no user data directory");
                         return false;
                 };
+                globals::log("mem::prepare dir ok");
                 if std::fs::create_dir_all(&directory).is_err() {
                         globals::log_error("InputMemory: cannot create directory");
                         return false;
                 }
                 let path = directory.join("memory.sqlite3");
+                globals::log("mem::prepare before open_readwrite");
                 let Some(database) = ImeDatabase::open_readwrite(&path) else {
                         globals::log_error("InputMemory: cannot open database");
                         return false;
                 };
+                globals::log("mem::prepare open_readwrite ok");
                 if !Self::prepare_schema(&database) {
                         globals::log_error("InputMemory: schema prepare failed");
                         return false;
                 }
+                globals::log("mem::prepare schema ok");
                 self.database = Some(database);
                 true
         }

@@ -29,8 +29,19 @@ struct Sqlite3Statement {
 
 // raw-dylib: rustc generates the import stubs itself — no winsqlite3.lib
 // needed, which keeps the i686 build working without SDK lib paths.
-#[link(name = "winsqlite3", kind = "raw-dylib")]
-unsafe extern "C" {
+//
+// IMPORTANT: "system" not "C" — Microsoft's winsqlite3.dll is built with
+// /Gz (stdcall) on x86, so every export pops its own args. Declaring these
+// as extern "C" (cdecl) makes the caller clean the stack a second time on
+// i686, drifting ESP on every call and eventually returning into garbage.
+// On x64 "system" == "C" so this is a no-op there.
+// import_name_type="undecorated" (x86 only): winsqlite3 exports plain
+// `sqlite3_*` names even though the functions are stdcall (it ships a .def
+// file), so rustc must not emit the usual `_name@N` decorated imports.
+// The attribute itself is rejected on other arches — gate with cfg_attr.
+#[cfg_attr(target_arch = "x86", link(name = "winsqlite3", kind = "raw-dylib", import_name_type = "undecorated"))]
+#[cfg_attr(not(target_arch = "x86"), link(name = "winsqlite3", kind = "raw-dylib"))]
+unsafe extern "system" {
         fn sqlite3_open_v2(filename: *const c_char, database: *mut *mut Sqlite3, flags: c_int, vfs: *const c_char) -> c_int;
         fn sqlite3_close_v2(database: *mut Sqlite3) -> c_int;
         fn sqlite3_errmsg(database: *mut Sqlite3) -> *const c_char;
@@ -49,7 +60,7 @@ unsafe extern "C" {
         fn sqlite3_exec(
                 database: *mut Sqlite3,
                 sql: *const c_char,
-                callback: Option<unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int>,
+                callback: Option<unsafe extern "system" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int>,
                 context: *mut c_void,
                 error_message: *mut *mut c_char,
         ) -> c_int;
@@ -226,12 +237,15 @@ impl ImeDatabase {
 
         /// Open a read-write user database (for input memory).
         pub fn open_readwrite(path: &Path) -> Option<Self> {
+                globals::log(&format!("db::open_rw {}", path.display()));
                 let path_text = path.to_str()?;
                 let c_path = CString::new(path_text).ok()?;
                 let mut raw: *mut Sqlite3 = ptr::null_mut();
+                globals::log("db::open_rw before open_v2");
                 let result = unsafe {
                         sqlite3_open_v2(c_path.as_ptr(), &mut raw, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, ptr::null())
                 };
+                globals::log(&format!("db::open_rw result={result} raw={:?}", raw));
                 if result != SQLITE_OK {
                         if !raw.is_null() {
                                 unsafe {
@@ -240,9 +254,11 @@ impl ImeDatabase {
                         }
                         return None;
                 }
+                globals::log("db::open_rw before busy_timeout");
                 unsafe {
                         sqlite3_busy_timeout(raw, 250);
                 }
+                globals::log("db::open_rw done");
                 Some(Self { raw })
         }
 
