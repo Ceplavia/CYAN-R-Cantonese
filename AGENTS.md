@@ -52,8 +52,17 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 - `RCANTONESE_SKIP_ENGINE`/`_MEMORY`/`_TRAY`/`_COMPARTMENTS`/`_PRESERVED`/`_LANGBAR` env — 二分用
 - `AdviseKeyEventSink` 失敗喺 debug build 唔會 early-return（synthetic host 冇真 input queue）
 
-**⚠️ 機器狀態**：HKCU shadow 仲喺度，指去 `%LOCALAPPDATA%\RCantonese\r-cantonese-x86.dll`（fixed release copy）— 裝咗新 installer 之後可以刪：
-`C:\Windows\SysWOW64\reg.exe delete "HKCU\Software\Classes\CLSID\{D2291A80-84D8-4641-9AB2-BDD1472C846B}" /f`
+**⚠️ 機器狀態**：HKCU shadow 仲喺度，兩個 arch 都指去 dev debug dll（log 全開）：
+- x64: `HKCU\Software\Classes\CLSID\{...}` → `target\debug\r_cantonese.dll`
+- x86: WOW6432Node view 同位 → `target\i686-pc-windows-msvc\debug\r_cantonese.dll`
+- `target\debug\ime.sqlite3` + `target\i686-...\debug\ime.sqlite3` 已 copy（engine 要 db 喺 dll 隔籬）
+- 裝咗正件 + reboot 之後先刪 shadow（否則 app 繼續行 dev dll）
+
+### ✅ 後續修咗（2026-09-21）
+- **Release 冇候選**：`RCANTONESE_SKIP_ENGINE` gate 寫反 — `cfg!(debug_assertions)` false → else 永遠行 → engine 永遠 None。改返 `is_ok()` 先 skip。
+- **右撳 menu 唔跟 click-away**：經典 Q135788 — popup owner 要 `SetForegroundWindow` 先至有 input focus；仲改埋 owner 做 worker thread 自己起嘅 hidden window（之前 `GetForegroundWindow()` 係外國 thread window，menu 可能閃爍即逝）。**Shell 右撳確實 call `OnClick(TF_LBI_CLK_RIGHT)`，唔係 InitMenu**（log 證實）。
+- **`.DEFAULT` phantom en-US/en-HK**：`User Profile\Languages` + `Preload` 俾嘢寫 — 冇提權清唔到；疑係 elevated `RegisterProfile` 嘅 `bEnableByDefault`/associated-keyboard 副作用（ILOT 已 gate）。待辦：installer `[Code]` elevated cleanup step。
+- **Install 後舊 dll 仲行緊**：`restartreplace` 排 `PendingFileRenameOperations` — 要 reboot 先換（或者 per-user shadow 繞過）。
 
 ## Workflow
 - **唔好主動 `git push`** — commit 照做，push 等用戶明確指示（減少 GitHub history 噪音）

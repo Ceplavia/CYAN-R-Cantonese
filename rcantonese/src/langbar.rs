@@ -948,6 +948,9 @@ fn show_settings_menu_owned(pt: POINT, items: Vec<MenuItem>, handler: Weak<Mutex
                         Err(_) => GetForegroundWindow(),
                 };
                 crate::globals::log(&format!("show_settings_menu: popup at ({},{}) hwnd={:?}", point.x, point.y, hwnd));
+                // Q135788: the menu only dismisses on click-away if the
+                // owner holds foreground — without this it stays open.
+                let _ = SetForegroundWindow(hwnd);
                 let cmd = TrackPopupMenuEx(menu, (TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD).0, point.x, point.y, hwnd, None);
                 crate::globals::log(&format!("show_settings_menu: TrackPopupMenuEx -> {}", cmd.0));
                 // Q135788: WM_NULL releases the menu's modal state cleanly.
