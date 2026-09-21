@@ -292,6 +292,41 @@ unsafe fn run() -> windows::core::Result<()> {
     doc.Push(&ctx)?;
     eprintln!("push ok");
 
+    if std::env::var("REPRO32_MENUTEST").is_ok() {
+        // bare popup test — no IME involved: does TrackPopupMenuEx work
+        // on this thread with a created owner?
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let cls: Vec<u16> = "ReproMenuOwner".encode_utf16().chain(Some(0)).collect();
+            extern "system" fn wp(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+                unsafe { DefWindowProcW(h, m, w, l) }
+            }
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpszClassName: PCWSTR(cls.as_ptr()),
+                lpfnWndProc: Some(wp),
+                ..Default::default()
+            };
+            RegisterClassExW(&wc);
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0), PCWSTR(cls.as_ptr()), PCWSTR::null(),
+                WS_OVERLAPPED, 0, 0, 0, 0, None, None, None, None,
+            )?;
+            eprintln!("owner hwnd={hwnd:?}");
+            let menu = CreatePopupMenu()?;
+            let txt: Vec<u16> = "Test item".encode_utf16().chain(Some(0)).collect();
+            let _ = AppendMenuW(menu, MF_STRING, 42, PCWSTR(txt.as_ptr()));
+            let _ = SetForegroundWindow(hwnd);
+            eprintln!("before track");
+            let cmd = TrackPopupMenuEx(menu, (TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD).0, 300, 300, hwnd, None);
+            let err = windows::Win32::Foundation::GetLastError();
+            eprintln!("track -> {} err={:?}", cmd.0, err);
+            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            let _ = DestroyMenu(menu);
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
     if std::env::var("REPRO32_RIGHTCLICK").is_ok() {
         // fetch our langbar item and invoke OnClick(TF_LBI_CLK_RIGHT) the
         // way the shell does — exercises the whole popup path in-process
@@ -306,10 +341,17 @@ unsafe fn run() -> windows::core::Result<()> {
                         let pt = POINT { x: 200, y: 200 };
                         let r = unsafe { btn.OnClick(TfLBIClick(1), pt, std::ptr::null()) };
                         eprintln!("OnClick(RIGHT) -> {r:?}");
-                        // give the worker thread a moment to reach TrackPopupMenuEx
-                        Sleep(500);
-                        // dismiss any popup
-                        let _ = PostMessageW(None, WM_NULL, WPARAM(0), LPARAM(0));
+                        // pump until the menu closes or 10s passes — the
+                        // deferred WM_SHOW_SETTINGS_MENU arrives via PostMessage
+                        let mut m = MSG::default();
+                        for _ in 0..200 {
+                            while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
+                                let _ = TranslateMessage(&m);
+                                DispatchMessageW(&m);
+                            }
+                            Sleep(50);
+                        }
+                        eprintln!("menu loop done");
                     }
                     Err(e) => eprintln!("cast ITfLangBarItemButton failed: {e:?}"),
                 }

@@ -235,12 +235,6 @@ fn add_tf_items(menu: &ITfMenu, items: &[MenuItem]) -> Result<()> {
 // Compartment event sink — port of CCompartmentEventSink.
 // ---------------------------------------------------------------------
 
-/// Newtype to move a Weak<Mutex<Processor>> to the popup worker thread — the
-/// in-proc COM objects it points at are free-threaded; only that thread
-/// dereferences it.
-struct SendPtr<T>(T);
-unsafe impl<T> Send for SendPtr<T> {}
-
 /// Run a shell-facing COM method body, converting any panic into E_FAIL so a
 /// fault in our code can never unwind into explorer/ctfmon.
 fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -320,6 +314,22 @@ pub fn deferred_refresh(item_ptr: usize) {
         if let Some(compartment) = item.compartment() {
                 if let Ok(is_open) = compartment.get_bool() {
                         crate::tray::update_mode(is_open && !crate::keys::caps_lock_on());
+                }
+        }
+}
+
+/// Deferred settings-menu dispatch — runs on the owning UI thread once the
+/// click's button-up is consumed. Same liveness contract as deferred_refresh.
+pub fn deferred_settings_menu(item_ptr: usize, x: i32, y: i32) {
+        let items = REFRESH_ITEMS.lock().unwrap_or_else(|e| e.into_inner());
+        if !items.contains(&item_ptr) {
+                return;
+        }
+        let item = unsafe { &*(item_ptr as *const LangBarItem) };
+        let handler = item.settings_handler.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(weak) = handler {
+                if let Some(processor) = weak.upgrade() {
+                        show_settings_menu_at(POINT { x, y }, &processor);
                 }
         }
 }
@@ -678,32 +688,23 @@ impl ITfLangBarItemButton_Impl for LangBarItem_Impl {
         fn OnClick(&self, click: TfLBIClick, pt: &POINT, _prcarea: *const RECT) -> Result<()> {
                 crate::globals::log(&format!("langbar OnClick click={}", click.0));
                 guarded(|| {
-                        const TF_LBI_CLK_LEFT: i32 = 0;
-                        if click.0 != TF_LBI_CLK_LEFT {
+                        // TfLBIClick: RIGHT=1, LEFT=2 (yes, reversed vs the
+                        // names — anything else isn't a real button press).
+                        const TF_LBI_CLK_RIGHT: i32 = 1;
+                        if click.0 == TF_LBI_CLK_RIGHT {
                                 // TF_LBI_CLK_RIGHT — in tray rendering the
                                 // shell calls OnClick and expects us to pop
                                 // the menu ourselves (weasel does the same
                                 // via TrackPopupMenuEx); InitMenu is only
                                 // used by the classic desktop language bar.
-                                // Run it on a worker thread — the popup is
-                                // modal and must not block the shell's call.
-                                let handler = self.settings_handler.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                                let point = *pt;
-                                if let Some(weak) = handler {
-                                        // SendPtr — in-proc COM objects are
-                                        // free-threaded; only the worker
-                                        // thread dereferences the Weak.
-                                        let weak = SendPtr(weak);
-                                        std::thread::spawn(move || {
-                                                // Bind first — a field access
-                                                // (weak.0) would capture just
-                                                // the non-Send field.
-                                                let weak = weak;
-                                                if let Some(processor) = weak.0.upgrade() {
-                                                        show_settings_menu_at(point, &processor);
-                                                }
-                                        });
-                                }
+                                //
+                                // Defer via the refresh window: the modal
+                                // popup must run after this click's
+                                // button-up is consumed, else the menu sees
+                                // the button-up as a click-away and closes
+                                // instantly.
+                                let item_ptr = std::ptr::from_ref(&**self) as usize;
+                                crate::tray::post_settings_menu(item_ptr, pt.x, pt.y);
                                 return Ok(());
                         }
                         let Some(compartment) = self.compartment() else {
@@ -906,11 +907,12 @@ fn show_settings_menu_owned(pt: POINT, items: Vec<MenuItem>, handler: Weak<Mutex
                 if point.x == 0 && point.y == 0 {
                         let _ = GetCursorPos(&mut point);
                 }
-                // Own the popup with a hidden window created on THIS thread —
-                // a foreign GetForegroundWindow() owner can make the modal
-                // menu dismiss instantly (user sees a flash or nothing).
+                // Dedicated WS_POPUP owner created on THIS thread (same
+                // pattern weasel's fix uses): a message-only or foreign
+                // window can't own a modal menu. WS_EX_TOOLWINDOW keeps it
+                // out of the taskbar/alt-tab.
                 use windows::Win32::UI::WindowsAndMessaging::{
-                        CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, WNDCLASSEXW, WS_OVERLAPPED, WINDOW_EX_STYLE,
+                        CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, WNDCLASSEXW, WS_POPUP, WS_EX_TOOLWINDOW,
                 };
                 extern "system" fn popup_owner_proc(
                         hwnd: HWND,
@@ -929,11 +931,11 @@ fn show_settings_menu_owned(pt: POINT, items: Vec<MenuItem>, handler: Weak<Mutex
                         ..Default::default()
                 };
                 let _ = RegisterClassExW(&wc); // ok if already registered
-                let hwnd = CreateWindowExW(
-                        WINDOW_EX_STYLE::default(),
+                let owner = match CreateWindowExW(
+                        WS_EX_TOOLWINDOW,
                         PCWSTR(cls_name.as_ptr()),
                         PCWSTR::null(),
-                        WS_OVERLAPPED,
+                        WS_POPUP,
                         0,
                         0,
                         0,
@@ -942,23 +944,25 @@ fn show_settings_menu_owned(pt: POINT, items: Vec<MenuItem>, handler: Weak<Mutex
                         None,
                         Some(globals::dll_instance().into()),
                         None,
-                );
-                let hwnd = match hwnd {
+                ) {
                         Ok(h) => h,
-                        Err(_) => GetForegroundWindow(),
+                        Err(e) => {
+                                crate::globals::log_error(&format!("show_settings_menu: owner create failed {e:?}"));
+                                let _ = DestroyMenu(menu);
+                                return;
+                        }
                 };
-                crate::globals::log(&format!("show_settings_menu: popup at ({},{}) hwnd={:?}", point.x, point.y, hwnd));
+                crate::globals::log(&format!("show_settings_menu: popup at ({},{}) hwnd={:?}", point.x, point.y, owner));
                 // Q135788: the menu only dismisses on click-away if the
                 // owner holds foreground — without this it stays open.
-                let _ = SetForegroundWindow(hwnd);
-                let cmd = TrackPopupMenuEx(menu, (TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD).0, point.x, point.y, hwnd, None);
-                crate::globals::log(&format!("show_settings_menu: TrackPopupMenuEx -> {}", cmd.0));
+                let _ = SetForegroundWindow(owner);
+                let cmd = TrackPopupMenuEx(menu, (TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD).0, point.x, point.y, owner, None);
+                let gle = GetLastError();
+                crate::globals::log(&format!("show_settings_menu: TrackPopupMenuEx -> {} gle=0x{:x}", cmd.0, gle.0));
                 // Q135788: WM_NULL releases the menu's modal state cleanly.
-                let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
                 let _ = DestroyMenu(menu);
-                if !hwnd.is_invalid() {
-                        let _ = DestroyWindow(hwnd);
-                }
+                let _ = DestroyWindow(owner);
                 if cmd.0 != 0 {
                         if let Some(processor) = handler.upgrade() {
                                 menu_command(&mut processor.lock().unwrap_or_else(|e| e.into_inner()), cmd.0 as u32);

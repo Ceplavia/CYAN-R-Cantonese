@@ -37,6 +37,7 @@ const WM_TRAY_PING: u32 = WM_APP + 48; // liveness probe — returns TRAY_MAGIC
 const WM_TRAY_SHOW: u32 = WM_APP + 50; // wParam = pid — IME active+foreground
 const WM_TRAY_HIDE: u32 = WM_APP + 51; // wParam = pid — IME no longer current
 const WM_LANGBAR_REFRESH: u32 = WM_APP + 52; // host windows: deferred langbar icon refresh
+const WM_SHOW_SETTINGS_MENU: u32 = WM_APP + 53; // host windows: deferred right-click menu
 const TRAY_MAGIC: isize = 0x5243; // 'RC'
 
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
@@ -165,6 +166,26 @@ pub fn post_langbar_refresh(item_ptr: usize) {
         }
 }
 
+/// Same deferral for the right-click menu — the modal TrackPopupMenuEx must
+/// run AFTER the click's button-up has been consumed, or it treats the
+/// button-up as a click-away and dismisses instantly. Posting to the
+/// refresh window keeps it on the owning UI thread (real message loop,
+/// real focus rights) while letting the click finish processing first.
+pub fn post_settings_menu(item_ptr: usize, x: i32, y: i32) {
+        let target = REFRESH_HWND.with(|h| {
+                if h.get() == 0 {
+                        h.set(raw(create_refresh_window()));
+                }
+                h.get()
+        });
+        if target != 0 {
+                let lp = ((x as u16 as u32) | ((y as u16 as u32) << 16)) as isize;
+                unsafe {
+                        let _ = PostMessageW(Some(hwnd(target)), WM_SHOW_SETTINGS_MENU, WPARAM(item_ptr), LPARAM(lp));
+                }
+        }
+}
+
 thread_local! {
         static REFRESH_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
@@ -203,6 +224,14 @@ unsafe extern "system" fn refresh_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM,
                 if msg == WM_LANGBAR_REFRESH {
                         return globals::guarded_value("langbar refresh", LRESULT(0), || {
                                 crate::langbar::deferred_refresh(wparam.0);
+                                LRESULT(0)
+                        });
+                }
+                if msg == WM_SHOW_SETTINGS_MENU {
+                        return globals::guarded_value("settings menu", LRESULT(0), || {
+                                let x = (lparam.0 as u16) as i16 as i32;
+                                let y = ((lparam.0 >> 16) as u16) as i16 as i32;
+                                crate::langbar::deferred_settings_menu(wparam.0, x, y);
                                 LRESULT(0)
                         });
                 }
