@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use windows::core::{GUID, PCWSTR};
+use windows::core::{GUID, Interface, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::Com::*;
@@ -291,6 +291,32 @@ unsafe fn run() -> windows::core::Result<()> {
 
     doc.Push(&ctx)?;
     eprintln!("push ok");
+
+    if std::env::var("REPRO32_RIGHTCLICK").is_ok() {
+        // fetch our langbar item and invoke OnClick(TF_LBI_CLK_RIGHT) the
+        // way the shell does — exercises the whole popup path in-process
+        let lbm: ITfLangBarItemMgr = tm.cast()?;
+        const GUID_LBI_INPUTMODE: GUID =
+            GUID::from_u128(0x2c77a81e_41cc_4178_a3a7_5f8a987568e6);
+        match lbm.GetItem(&GUID_LBI_INPUTMODE) {
+            Ok(item) => {
+                eprintln!("GetItem(LBI_INPUTMODE) ok");
+                match item.cast::<ITfLangBarItemButton>() {
+                    Ok(btn) => {
+                        let pt = POINT { x: 200, y: 200 };
+                        let r = unsafe { btn.OnClick(TfLBIClick(1), pt, std::ptr::null()) };
+                        eprintln!("OnClick(RIGHT) -> {r:?}");
+                        // give the worker thread a moment to reach TrackPopupMenuEx
+                        Sleep(500);
+                        // dismiss any popup
+                        let _ = PostMessageW(None, WM_NULL, WPARAM(0), LPARAM(0));
+                    }
+                    Err(e) => eprintln!("cast ITfLangBarItemButton failed: {e:?}"),
+                }
+            }
+            Err(e) => eprintln!("GetItem failed: {e:?}"),
+        }
+    }
 
     // pump messages so PostMessage-based deferred work runs
     let mut msg = MSG::default();

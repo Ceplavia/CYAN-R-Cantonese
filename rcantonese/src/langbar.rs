@@ -725,9 +725,13 @@ impl ITfLangBarItemButton_Impl for LangBarItem_Impl {
                         let Some(processor) = weak.upgrade() else { return Ok(()) };
                         // try_lock — a blocking wait here hangs the shell's UI
                         // thread (explorer) when another thread holds the lock.
-                        let Ok(processor) = processor.try_lock() else { return Ok(()) };
+                        let Ok(processor) = processor.try_lock() else {
+                                crate::globals::log("InitMenu: try_lock failed");
+                                return Ok(());
+                        };
                         let snapshot = build_menu_snapshot(&processor);
                         drop(processor);
+                        crate::globals::log(&format!("InitMenu: adding {} items", snapshot.len()));
                         add_tf_items(menu, &snapshot)
                 })
         }
@@ -876,10 +880,15 @@ fn build_popup(menu: windows::Win32::UI::WindowsAndMessaging::HMENU, items: &[Me
 /// Show the settings popup at `pt` — used by the tray icon's host window.
 /// Runs on the caller's thread (our own UI/worker thread, never the shell's).
 pub fn show_settings_menu_at(pt: POINT, processor: &std::sync::Arc<Mutex<Processor>>) {
+        crate::globals::log(&format!("show_settings_menu_at pt=({},{})", pt.x, pt.y));
         let snapshot = match processor.try_lock() {
                 Ok(p) => build_menu_snapshot(&p),
-                Err(_) => return,
+                Err(_) => {
+                        crate::globals::log("show_settings_menu_at: try_lock failed");
+                        return;
+                }
         };
+        crate::globals::log(&format!("show_settings_menu_at: {} items", snapshot.len()));
         show_settings_menu_owned(pt, snapshot, std::sync::Arc::downgrade(processor));
 }
 
@@ -887,18 +896,66 @@ fn show_settings_menu_owned(pt: POINT, items: Vec<MenuItem>, handler: Weak<Mutex
         unsafe {
                 let menu = match CreatePopupMenu() {
                         Ok(m) => m,
-                        Err(_) => return,
+                        Err(_) => {
+                                crate::globals::log_error("show_settings_menu: CreatePopupMenu failed");
+                                return;
+                        }
                 };
                 build_popup(menu, &items);
                 let mut point = pt;
                 if point.x == 0 && point.y == 0 {
                         let _ = GetCursorPos(&mut point);
                 }
-                let hwnd = GetForegroundWindow();
+                // Own the popup with a hidden window created on THIS thread —
+                // a foreign GetForegroundWindow() owner can make the modal
+                // menu dismiss instantly (user sees a flash or nothing).
+                use windows::Win32::UI::WindowsAndMessaging::{
+                        CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, WNDCLASSEXW, WS_OVERLAPPED, WINDOW_EX_STYLE,
+                };
+                extern "system" fn popup_owner_proc(
+                        hwnd: HWND,
+                        msg: u32,
+                        w: WPARAM,
+                        l: LPARAM,
+                ) -> LRESULT {
+                        unsafe { DefWindowProcW(hwnd, msg, w, l) }
+                }
+                let cls_name: Vec<u16> = "RCantonesePopupOwner".encode_utf16().chain(Some(0)).collect();
+                let wc = WNDCLASSEXW {
+                        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                        lpszClassName: PCWSTR(cls_name.as_ptr()),
+                        lpfnWndProc: Some(popup_owner_proc),
+                        hInstance: globals::dll_instance().into(),
+                        ..Default::default()
+                };
+                let _ = RegisterClassExW(&wc); // ok if already registered
+                let hwnd = CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        PCWSTR(cls_name.as_ptr()),
+                        PCWSTR::null(),
+                        WS_OVERLAPPED,
+                        0,
+                        0,
+                        0,
+                        0,
+                        None,
+                        None,
+                        Some(globals::dll_instance().into()),
+                        None,
+                );
+                let hwnd = match hwnd {
+                        Ok(h) => h,
+                        Err(_) => GetForegroundWindow(),
+                };
+                crate::globals::log(&format!("show_settings_menu: popup at ({},{}) hwnd={:?}", point.x, point.y, hwnd));
                 let cmd = TrackPopupMenuEx(menu, (TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD).0, point.x, point.y, hwnd, None);
+                crate::globals::log(&format!("show_settings_menu: TrackPopupMenuEx -> {}", cmd.0));
                 // Q135788: WM_NULL releases the menu's modal state cleanly.
                 let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
                 let _ = DestroyMenu(menu);
+                if !hwnd.is_invalid() {
+                        let _ = DestroyWindow(hwnd);
+                }
                 if cmd.0 != 0 {
                         if let Some(processor) = handler.upgrade() {
                                 menu_command(&mut processor.lock().unwrap_or_else(|e| e.into_inner()), cmd.0 as u32);

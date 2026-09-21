@@ -158,10 +158,10 @@ impl Processor {
                         processor.setup_language_bar(thread_mgr, false);
                 }
                 crate::globals::log("Processor::new after langbar");
-                if cfg!(debug_assertions) && std::env::var("RCANTONESE_SKIP_ENGINE").is_err() {
-                        processor.engine = CoreImeEngine::prepare();
-                } else {
+                if cfg!(debug_assertions) && std::env::var("RCANTONESE_SKIP_ENGINE").is_ok() {
                         crate::globals::log("Processor::new engine skipped");
+                } else {
+                        processor.engine = CoreImeEngine::prepare();
                 }
                 crate::globals::log(&format!(
                         "Processor::new engine={} db={}",
