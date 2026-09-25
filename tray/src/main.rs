@@ -60,7 +60,63 @@ fn ensure_input_tip() {
                 if !ok.as_bool() {
                         log_error("InstallLayoutOrTip failed (tray ensure)");
                 }
+                // If zh-HK itself isn't in the user's language list the tip has
+                // nowhere to attach (seen on zh-CN-only systems). Installing the
+                // zh-HK "US" keyboard forces the language into the list; our tip
+                // then sits beside it. Cost: a spare "US" keyboard under zh-HK
+                // in Settings — only on machines that lacked the language.
+                if !user_has_language() {
+                        let kb: Vec<u16> = "0C04:00000409".encode_utf16().chain(Some(0)).collect();
+                        if !f(PCWSTR(kb.as_ptr()), 0).as_bool() {
+                                log_error("InstallLayoutOrTip failed (zh-HK language)");
+                        }
+                }
                 let _ = FreeLibrary(module);
+        }
+}
+
+/// Whether zh-Hant-HK is in the user's profile language list —
+/// HKCU\Control Panel\International\User Profile\Languages (REG_MULTI_SZ).
+fn user_has_language() -> bool {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_MULTI_SZ, RegGetValueW};
+        unsafe {
+                let key_path: Vec<u16> = "Control Panel\\International\\User Profile"
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
+                let value: Vec<u16> = "Languages".encode_utf16().chain(Some(0)).collect();
+                let mut size = 0u32;
+                if RegGetValueW(
+                        HKEY_CURRENT_USER,
+                        PCWSTR(key_path.as_ptr()),
+                        PCWSTR(value.as_ptr()),
+                        RRF_RT_REG_MULTI_SZ,
+                        None,
+                        None,
+                        Some(&mut size),
+                )
+                .is_err()
+                        || size < 4
+                {
+                        return false;
+                }
+                let mut buf = vec![0u16; (size / 2) as usize + 1];
+                if RegGetValueW(
+                        HKEY_CURRENT_USER,
+                        PCWSTR(key_path.as_ptr()),
+                        PCWSTR(value.as_ptr()),
+                        RRF_RT_REG_MULTI_SZ,
+                        None,
+                        Some(buf.as_mut_ptr() as *mut _),
+                        Some(&mut size),
+                )
+                .is_err()
+                {
+                        return false;
+                }
+                buf.split(|&c| c == 0)
+                        .map(|s| String::from_utf16_lossy(s).to_lowercase())
+                        .any(|s| s == "zh-hant-hk" || s == "zh-hk")
         }
 }
 const TRAY_ICON_ID: u32 = 0x4341;

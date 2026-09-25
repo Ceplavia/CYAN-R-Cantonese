@@ -70,12 +70,10 @@ Source: "target\release\zh-CN\*"; DestDir: "{app}\zh-CN"; Flags: ignoreversion s
 Filename: "regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese..."
 ; 32-bit view of regsvr32 → writes WOW6432Node CLSID + TIP for x86 apps.
 Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese (32-bit)..."
-; Tray host starts now (un-elevated, as the installing user) and at login.
-; postinstall → launched from the Finish page's checkbox, so a slow/hung
-; spawn can never freeze the wizard mid-install.
-Filename: "{app}\r-cantonese-tray.exe"; Flags: runasoriginaluser nowait postinstall
-; Config center opens at the end so the user can tweak or just close it.
-Filename: "{app}\config-center.exe"; Flags: runasoriginaluser nowait postinstall skipifsilent
+; Tray host + config center launch at ssPostInstall via ExecAsOriginalUser
+; (see [Code]) — a [Run] entry would pop an "unable to execute" dialog when
+; spawning as the original user fails (e.g. standard user who elevated with
+; different admin credentials); the login autostart Run key covers it anyway.
 
 [UninstallRun]
 ; Before files are deleted: unregister the IME (drops the input tip, the
@@ -93,11 +91,26 @@ end;
 
 // Stop the helpers before install/upgrade replaces their files.
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  AppDir: String;
 begin
   if CurStep = ssInstall then
   begin
     KillHelper('r-cantonese-tray.exe');
     KillHelper('config-center.exe');
+  end;
+  if CurStep = ssPostInstall then
+  begin
+    // Launch in the installing user's context — the tray's ensure_input_tip
+    // must run as the user (ILOT writes HKCU). Failures are intentionally
+    // ignored: the Run-key autostart covers the next login, and on systems
+    // where "original user" resolution fails an Inno [Run] entry would show
+    // a scary "unable to execute" dialog for something that isn't fatal.
+    AppDir := ExpandConstant('{app}');
+    ExecAsOriginalUser(AppDir + '\r-cantonese-tray.exe', '', '', SW_HIDE, ewNoWait, ResultCode);
+    if not WizardSilent then
+      ExecAsOriginalUser(AppDir + '\config-center.exe', '', '', SW_SHOW, ewNoWait, ResultCode);
   end;
 end;
 

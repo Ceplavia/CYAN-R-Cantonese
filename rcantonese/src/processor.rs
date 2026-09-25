@@ -192,7 +192,10 @@ impl Processor {
                 use crate::strings::*;
                 self.preserved_keys = vec![
                         key(globals::GUID_PRESERVEDKEY_INPUT_MODE, 0x10, globals::TF_MOD_ON_KEYUP_SHIFT_ONLY, IDS_DESC_INPUT_MODE_TOGGLE),
-                        key(globals::GUID_PRESERVEDKEY_CHARACTER_FORM, 0x20, globals::TF_MOD_SHIFT, IDS_DESC_CHARACTER_FORM_TOGGLE),
+                        // Shift+Space is intentionally NOT a preserved key: it must
+                        // reach the app as a plain space (users expect Shift+Space to
+                        // type a space). Half/full-width toggling is still available
+                        // via Ctrl+Shift+5/6 and the options menu.
                         key(globals::GUID_PRESERVEDKEY_PUNCTUATION_FORM, 0xBE, globals::TF_MOD_CONTROL, IDS_DESC_PUNCTUATION_FORM_TOGGLE),
                         key(globals::GUID_PRESERVEDKEY_VARIANT_TRADITIONAL, 0x31, globals::TF_MOD_CONTROL | globals::TF_MOD_SHIFT, IDS_DESC_CHARACTER_VARIANT_TRADITIONAL),
                         key(globals::GUID_PRESERVEDKEY_VARIANT_HONGKONG, 0x32, globals::TF_MOD_CONTROL | globals::TF_MOD_SHIFT, IDS_DESC_CHARACTER_VARIANT_HONG_KONG),

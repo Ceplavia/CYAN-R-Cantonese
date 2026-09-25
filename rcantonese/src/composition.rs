@@ -233,6 +233,14 @@ pub fn clear_composition_display_attributes(state: &ServiceState, ec: u32, conte
                         let _ = property.Clear(ec, &range);
                 }
         }
+        // Clear the langid we stamped on the composition range before commit —
+        // otherwise apps like Word bind the committed text to the IME's
+        // language (0x0c04 → PMingLiU) instead of the document's own font.
+        if let Ok(property) = unsafe { context.GetProperty(&GUID_PROP_LANGID) } {
+                unsafe {
+                        let _ = property.Clear(ec, &range);
+                }
+        }
 }
 
 /// Port of _SetCompositionLanguage.

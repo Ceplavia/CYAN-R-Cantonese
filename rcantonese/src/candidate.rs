@@ -329,6 +329,41 @@ fn row_height(state: &CandidateWindowState) -> i32 {
         state.candidate_font_size.max(state.comment_font_size).max(state.number_font_size) as i32 + 10
 }
 
+fn make_font(size: u32) -> HFONT {
+        unsafe {
+                CreateFontW(
+                        -(size as i32),
+                        0,
+                        0,
+                        0,
+                        FW_NORMAL.0 as i32,
+                        0,
+                        0,
+                        0,
+                        DEFAULT_CHARSET,
+                        OUT_DEFAULT_PRECIS,
+                        CLIP_DEFAULT_PRECIS,
+                        CLEARTYPE_QUALITY,
+                        DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+                        w!("Microsoft JhengHei"),
+                )
+        }
+}
+
+/// Measure `text` under `font` — caller manages the DC and restores fonts.
+unsafe fn text_width(hdc: HDC, font: HFONT, text: &[u16]) -> i32 {
+        unsafe {
+                if text.is_empty() {
+                        return 0;
+                }
+                let old = SelectObject(hdc, font.into());
+                let mut size = SIZE::default();
+                let _ = GetTextExtentPoint32W(hdc, text, &mut size);
+                SelectObject(hdc, old);
+                size.cx
+        }
+}
+
 fn measure_height(state: &CandidateWindowState, page_size: usize) -> u32 {
         let page = state.current_page();
         let rows = state
@@ -355,38 +390,22 @@ fn measure_width(state: &CandidateWindowState, hwnd: HWND) -> u32 {
                 if hdc.is_invalid() {
                         return 200;
                 }
-                let font = CreateFontW(
-                        -(state.candidate_font_size as i32),
-                        0,
-                        0,
-                        0,
-                        FW_NORMAL.0 as i32,
-                        0,
-                        0,
-                        0,
-                        DEFAULT_CHARSET,
-                        OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS,
-                        CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
-                        w!("Microsoft JhengHei"),
-                );
-                let old_font = SelectObject(hdc, font.into());
+                let num_font = make_font(state.number_font_size);
+                let cand_font = make_font(state.candidate_font_size);
+                let cmt_font = make_font(state.comment_font_size);
                 let mut max_cx = 40i32;
                 for (index, item) in state.items[start..=end].iter().enumerate() {
-                        let line = if item.comment.is_empty() {
-                                format!("{}. {}", index + 1 - start, item.text)
-                        } else {
-                                format!("{}. {}  {}", index + 1 - start, item.text, item.comment)
-                        };
-                        let wide: Vec<u16> = line.encode_utf16().collect();
-                        let mut size = SIZE::default();
-                        if GetTextExtentPoint32W(hdc, &wide, &mut size).as_bool() {
-                                max_cx = max_cx.max(size.cx);
-                        }
+                        let label: Vec<u16> = format!("{}.", index + 1 - start).encode_utf16().collect();
+                        let text: Vec<u16> = format!(" {}", item.text).encode_utf16().collect();
+                        let comment: Vec<u16> = format!("  {}", item.comment).encode_utf16().collect();
+                        let cx = text_width(hdc, num_font, &label)
+                                + text_width(hdc, cand_font, &text)
+                                + text_width(hdc, cmt_font, &comment);
+                        max_cx = max_cx.max(cx);
                 }
-                SelectObject(hdc, old_font);
-                let _ = DeleteObject(font.into());
+                let _ = DeleteObject(num_font.into());
+                let _ = DeleteObject(cand_font.into());
+                let _ = DeleteObject(cmt_font.into());
                 let _ = ReleaseDC(Some(hwnd), hdc);
                 let width = (max_cx + 16) as u32;
                 globals::log(&format!("measure_width: items={} max_cx={max_cx} w={width}", state.items.len()));
@@ -440,23 +459,12 @@ fn paint_candidates(hwnd: HWND, hdc: HDC) {
                 let rh = row_height(&state);
                 let page = state.current_page();
                 let Some((start, end)) = state.page_bounds(page) else { return };
-                let font = CreateFontW(
-                        -(state.candidate_font_size as i32),
-                        0,
-                        0,
-                        0,
-                        FW_NORMAL.0 as i32,
-                        0,
-                        0,
-                        0,
-                        DEFAULT_CHARSET,
-                        OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS,
-                        CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH.0 as u32,
-                        w!("Microsoft JhengHei"),
-                );
-                let old_font = SelectObject(hdc, font.into());
+                let num_font = make_font(state.number_font_size);
+                let cand_font = make_font(state.candidate_font_size);
+                let cmt_font = make_font(state.comment_font_size);
+                // Restore the DC's original font before deleting ours —
+                // DeleteObject on a still-selected font fails silently.
+                let mut orig_font = HGDIOBJ::default();
                 // Track the true rendered right edge on the paint DC — its DPI
                 // context is authoritative; if the window is too narrow we
                 // resize below instead of trusting an off-DC measurement.
@@ -485,28 +493,42 @@ fn paint_candidates(hwnd: HWND, hdc: HDC) {
                                 FillRect(hdc, &rc, brush);
                                 let _ = DeleteObject(brush.into());
                         }
-                        let label = format!("{}. {}", shown, item.text);
-                        let mut wide: Vec<u16> = label.encode_utf16().collect();
                         SetBkMode(hdc, TRANSPARENT);
+                        let mut x = 8;
+                        // "N." — number font
+                        let mut label: Vec<u16> = format!("{}.", shown).encode_utf16().collect();
                         SetTextColor(hdc, COLORREF(state.text_color));
-                        rc.left = 8;
+                        if orig_font.is_invalid() {
+                                orig_font = SelectObject(hdc, num_font.into());
+                        } else {
+                                SelectObject(hdc, num_font.into());
+                        }
+                        rc.left = x;
+                        DrawTextW(hdc, &mut label, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
+                        x += text_width(hdc, num_font, &label);
+                        // " candidate" — candidate font
+                        let mut wide: Vec<u16> = format!(" {}", item.text).encode_utf16().collect();
+                        SelectObject(hdc, cand_font.into());
+                        rc.left = x;
                         DrawTextW(hdc, &mut wide, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                        let mut size = SIZE::default();
-                        let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
-                        let mut right = 8 + size.cx;
+                        x += text_width(hdc, cand_font, &wide);
+                        // "  comment" — comment font
                         if !item.comment.is_empty() {
-                                let mut comment: Vec<u16> = format!(" {}", item.comment).encode_utf16().collect();
-                                rc.left = 8 + size.cx + 6;
+                                let mut comment: Vec<u16> = format!("  {}", item.comment).encode_utf16().collect();
+                                SelectObject(hdc, cmt_font.into());
+                                rc.left = x;
                                 SetTextColor(hdc, COLORREF(state.comment_color));
                                 DrawTextW(hdc, &mut comment, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                                let mut csize = SIZE::default();
-                                let _ = GetTextExtentPoint32W(hdc, &comment, &mut csize);
-                                right = rc.left + csize.cx;
+                                x += text_width(hdc, cmt_font, &comment);
                         }
-                        max_right = max_right.max(right);
+                        max_right = max_right.max(x);
                 }
-                SelectObject(hdc, old_font);
-                let _ = DeleteObject(font.into());
+                if !orig_font.is_invalid() {
+                        SelectObject(hdc, orig_font);
+                }
+                let _ = DeleteObject(num_font.into());
+                let _ = DeleteObject(cand_font.into());
+                let _ = DeleteObject(cmt_font.into());
                 // Self-correct the window width using the real rendered extent.
                 let needed = max_right + 8;
                 let mut client = RECT::default();

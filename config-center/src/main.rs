@@ -427,7 +427,27 @@ impl Component for ConfigCenter {
                         Msg::InstallLocale => {
                                 let langid = LOCALE_LABELS[self.locale_index.min(LOCALE_LABELS.len() - 1)].1;
                                 self.status = match elevate_install_locale(langid) {
-                                        Ok(()) => self.t("Elevation requested — confirm the UAC prompt.", "已要求提權安裝 — 請確認 UAC 提示。"),
+                                        Ok(child) => {
+                                                // The elevated child writes HKLM
+                                                // (RegisterProfile). Once it exits,
+                                                // install the tip into THIS user's
+                                                // input list — ILOT must not run
+                                                // elevated or it lands on .DEFAULT.
+                                                let wait = unsafe {
+                                                        windows::Win32::System::Threading::WaitForSingleObject(child, 60_000)
+                                                };
+                                                unsafe {
+                                                        let _ = windows::Win32::Foundation::CloseHandle(child);
+                                                }
+                                                if wait != windows::Win32::Foundation::WAIT_OBJECT_0 {
+                                                        self.t("Timed out waiting for the elevated step.", "等待提權步驟超時。")
+                                                } else {
+                                                        match install_tip_for_user(langid) {
+                                                                Ok(()) => self.t("Input method installed.", "輸入法語言設定檔已安裝。"),
+                                                                Err(e) => format!("{}{e}", self.t("Install failed: ", "安裝失敗：")),
+                                                        }
+                                                }
+                                        }
                                         Err(e) => format!("{}{e}", self.t("Elevation failed: ", "提權失敗：")),
                                 };
                         }
@@ -702,15 +722,20 @@ impl Component for ConfigCenter {
 }
 
 /// Relaunch ourselves elevated to install a TSF profile — profile
-/// registration writes HKLM so it needs admin rights.
-fn elevate_install_locale(langid: u16) -> Result<(), String> {
+/// registration writes HKLM so it needs admin rights. Returns the child
+/// process handle so the caller can wait, then install the tip into the
+/// *user's* input list (ILOT must not run elevated).
+fn elevate_install_locale(langid: u16) -> Result<windows::Win32::Foundation::HANDLE, String> {
         use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
         use windows::Win32::UI::Shell::*;
         unsafe {
-                let mut path = [0u16; 260];
+                let mut path = vec![0u16; 512];
                 let len = GetModuleFileNameW(None, &mut path) as usize;
+                if len == 0 || len >= path.len() {
+                        return Err("GetModuleFileNameW failed".into());
+                }
+                path.truncate(len + 1);
                 let exe = PCWSTR::from_raw(path.as_ptr());
-                let _ = len;
                 let params: Vec<u16> = format!("--install-locale {langid}")
                         .encode_utf16()
                         .chain(std::iter::once(0))
@@ -718,6 +743,7 @@ fn elevate_install_locale(langid: u16) -> Result<(), String> {
                 let verb: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
                 let mut info = SHELLEXECUTEINFOW {
                         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+                        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
                         hwnd: HWND::default(),
                         lpVerb: PCWSTR(verb.as_ptr()),
                         lpFile: exe,
@@ -725,7 +751,97 @@ fn elevate_install_locale(langid: u16) -> Result<(), String> {
                         nShow: SW_HIDE.0,
                         ..Default::default()
                 };
-                ShellExecuteExW(&mut info).map_err(|e| format!("{:?}", e.code()))
+                ShellExecuteExW(&mut info).map_err(|e| format!("{:?}", e.code()))?;
+                if info.hProcess.is_invalid() {
+                        return Err("no child handle".into());
+                }
+                Ok(info.hProcess)
+        }
+}
+
+/// InstallLayoutOrTip for our tip under `langid` — must run in the user's
+/// own context (this process is asInvoker, so it is). Also forces the
+/// language into the user's language list when it's missing, otherwise the
+/// tip has nothing to attach to and never appears in the picker.
+fn install_tip_for_user(langid: u16) -> Result<(), String> {
+        use windows::Win32::Foundation::FreeLibrary;
+        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        unsafe {
+                let module = LoadLibraryW(PCWSTR::from_raw("input.dll\0".as_ptr() as *const u16))
+                        .map_err(|e| format!("{:?}", e.code()))?;
+                let proc_addr = GetProcAddress(module, windows::core::PCSTR::from_raw("InstallLayoutOrTip\0".as_ptr()));
+                let Some(proc_addr) = proc_addr else {
+                        let _ = FreeLibrary(module);
+                        return Err("InstallLayoutOrTip not found".into());
+                };
+                let f: unsafe extern "system" fn(PCWSTR, u32) -> BOOL = std::mem::transmute(proc_addr);
+                let tip = format!("{langid:04X}:{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}");
+                let wide: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
+                if !f(PCWSTR(wide.as_ptr()), 0).as_bool() {
+                        let _ = FreeLibrary(module);
+                        return Err("InstallLayoutOrTip failed".into());
+                }
+                // If the language itself isn't in the user's profile list yet,
+                // install its stock keyboard to force it in — our tip then
+                // attaches under it (only on machines lacking the language).
+                if !user_has_language(langid) {
+                        let kb = format!("{langid:04X}:00000409");
+                        let wide: Vec<u16> = kb.encode_utf16().chain(std::iter::once(0)).collect();
+                        let _ = f(PCWSTR(wide.as_ptr()), 0);
+                }
+                let _ = FreeLibrary(module);
+                Ok(())
+        }
+}
+
+/// Whether the language for `langid` is in the user's profile language list
+/// (HKCU\...\User Profile\Languages, REG_MULTI_SZ of BCP-47 names).
+fn user_has_language(langid: u16) -> bool {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_MULTI_SZ, RegGetValueW};
+        let expected: &[&str] = match langid {
+                0x0c04 => &["zh-hant-hk", "zh-hk"],
+                0x0804 => &["zh-hans-cn", "zh-cn"],
+                0x0404 => &["zh-hant-tw", "zh-tw"],
+                _ => &[],
+        };
+        unsafe {
+                let key_path: Vec<u16> = "Control Panel\\International\\User Profile"
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                let value: Vec<u16> = "Languages".encode_utf16().chain(std::iter::once(0)).collect();
+                let mut size = 0u32;
+                if RegGetValueW(
+                        HKEY_CURRENT_USER,
+                        windows::core::PCWSTR(key_path.as_ptr()),
+                        windows::core::PCWSTR(value.as_ptr()),
+                        RRF_RT_REG_MULTI_SZ,
+                        None,
+                        None,
+                        Some(&mut size),
+                )
+                .is_err()
+                        || size < 4
+                {
+                        return false;
+                }
+                let mut buf = vec![0u16; (size / 2) as usize + 1];
+                if RegGetValueW(
+                        HKEY_CURRENT_USER,
+                        windows::core::PCWSTR(key_path.as_ptr()),
+                        windows::core::PCWSTR(value.as_ptr()),
+                        RRF_RT_REG_MULTI_SZ,
+                        None,
+                        Some(buf.as_mut_ptr() as *mut _),
+                        Some(&mut size),
+                )
+                .is_err()
+                {
+                        return false;
+                }
+                buf.split(|&c| c == 0)
+                        .map(|s| String::from_utf16_lossy(s).to_lowercase())
+                        .any(|s| expected.contains(&s.as_str()))
         }
 }
 
@@ -741,15 +857,15 @@ fn main() {
                 use windows::Win32::UI::WindowsAndMessaging::*;
                 unsafe {
                         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-                        let (text, style) = match install_locale(langid) {
-                                Ok(()) => ("輸入法語言設定檔已安裝。", MB_ICONINFORMATION.0),
-                                Err(e) => ("安裝失敗", MB_ICONERROR.0),
+                        let (body_text, style, code) = match install_locale(langid) {
+                                Ok(()) => ("輸入法語言設定檔已安裝。".to_string(), MB_ICONINFORMATION.0, 0),
+                                Err(e) => (format!("安裝失敗：{e}"), MB_ICONERROR.0, 1),
                         };
                         let title: Vec<u16> = "R-Cantonese".encode_utf16().chain(std::iter::once(0)).collect();
-                        let body: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+                        let body: Vec<u16> = body_text.encode_utf16().chain(std::iter::once(0)).collect();
                         let _ = MessageBoxW(None, PCWSTR(body.as_ptr()), PCWSTR(title.as_ptr()), MESSAGEBOX_STYLE(style));
+                        std::process::exit(code);
                 }
-                return;
         }
         App::run_component::<ConfigCenter>(()).unwrap();
 }

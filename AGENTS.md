@@ -52,11 +52,15 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 - `RCANTONESE_SKIP_ENGINE`/`_MEMORY`/`_TRAY`/`_COMPARTMENTS`/`_PRESERVED`/`_LANGBAR` env — 二分用
 - `AdviseKeyEventSink` 失敗喺 debug build 唔會 early-return（synthetic host 冇真 input queue）
 
-**⚠️ 機器狀態**：HKCU shadow 仲喺度，兩個 arch 都指去 dev debug dll（log 全開）：
-- x64: `HKCU\Software\Classes\CLSID\{...}` → `target\debug\r_cantonese.dll`
-- x86: WOW6432Node view 同位 → `target\i686-pc-windows-msvc\debug\r_cantonese.dll`
-- `target\debug\ime.sqlite3` + `target\i686-...\debug\ime.sqlite3` 已 copy（engine 要 db 喺 dll 隔籬）
-- 裝咗正件 + reboot 之後先刪 shadow（否則 app 繼續行 dev dll）
+**機器狀態**：HKCU shadow 已刪（0.9.2 裝完 + reboot 後）— 兩個 arch 都行 Program Files 正件。要再 dev inject 先重新寫 shadow。
+
+### ✅ 2026-09-25 用戶回報六個 issue（0.9.2 之後）
+1. **編號/註釋字號冇用** — `candidate.rs` paint/measure 之前淨係用 `candidate_font_size`；改咗三個獨立 HFONT（`make_font` + `text_width` helper），逐段 select/draw/measure。**GDI 陷阱**：DeleteObject 前要還原 DC original font（儲第一次 SelectObject 嘅返回值）。
+2. **Shift+Space 食咗唔出字** — 佢係 preserved key（0x20+SHIFT → 半/全形切換）。**已刪**呢個 preserved key；Ctrl+Shift+5/6 + menu 仲有。shift+space 而家跟返普通 key path（idle → app 出空格 / charform=full → 0x3000；compose 中 → finalize）。
+3. **Word 打出 PMingLiU** — `set_composition_language` 將 compose range 標 0x0c04（`GUID_PROP_LANGID`），commit 前冇清 → Word 按 langid 綁東亞字體。`clear_composition_display_attributes` 而家連 `GUID_PROP_LANGID` 都清埋（commit 後繼承文件自身字體）。**等真機 Word 驗證**。
+4. **冇 zh-HK 語言時揀唔到 IME** — tray `ensure_input_tip` 加咗 `user_has_language` 檢查：zh-HK 唔喺 `User Profile\Languages` 就補 `ILOT("0C04:00000409")` 強制加語言（副作用：zh-HK 下多個 US keyboard，淨係缺語言嘅機先出現）。config-center `install_locale` 之前**冇 call ILOT**（RegisterProfile+ActivateProfile 唔入用戶清單！）— 而家 elevated child 完咗由 asInvoker parent 行 `install_tip_for_user`。
+5. **重裝時「提權失敗」提示** — Inno `[Run]` 嘅 `runasoriginaluser` 喺某啲機 spawn 失敗會彈 error dialog；搬咗入 `[Code]` 用 `ExecAsOriginalUser` + 靜默失敗（login autostart 兜底）。
+6. **默認簡體** — code 默認係 Traditional（`settings.rs:74`）；settings.toml 冇嘅話唔會自動寫。**懷疑係嗰部機之前有存「simplified」嘅 toml** — 非 code bug，待確認。
 
 ### ✅ 後續修咗（2026-09-21）
 - **Release 冇候選**：`RCANTONESE_SKIP_ENGINE` gate 寫反 — `cfg!(debug_assertions)` false → else 永遠行 → engine 永遠 None。改返 `is_ok()` 先 skip。
