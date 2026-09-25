@@ -28,23 +28,23 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Jyutping.org"
             VALUE "FileDescription", "R-Cantonese Input Method"
-            VALUE "FileVersion", "0.9.2"
+            VALUE "FileVersion", "0.9.3"
             VALUE "InternalName", "R-Cantonese"
             VALUE "LegalCopyright", "CC0 1.0 Public Domain"
             VALUE "OriginalFilename", "r-cantonese.dll"
             VALUE "ProductName", "R-Cantonese"
-            VALUE "ProductVersion", "0.9.2"
+            VALUE "ProductVersion", "0.9.3"
         END
         BLOCK "0c0404b0"
         BEGIN
             VALUE "CompanyName", "Jyutping.org"
             VALUE "FileDescription", "R-Cantonese Input Method"
-            VALUE "FileVersion", "0.9.2"
+            VALUE "FileVersion", "0.9.3"
             VALUE "InternalName", "R-Cantonese"
             VALUE "LegalCopyright", "CC0 1.0 Public Domain"
             VALUE "OriginalFilename", "r-cantonese.dll"
             VALUE "ProductName", "R-Cantonese"
-            VALUE "ProductVersion", "0.9.2"
+            VALUE "ProductVersion", "0.9.3"
         END
     END
     BLOCK "VarFileInfo"
