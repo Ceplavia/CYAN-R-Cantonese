@@ -114,6 +114,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "r-cantonese-ime"
+version = "0.9.3"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "r-cantonese-tray"
 version = "0.9.3"
 dependencies = [

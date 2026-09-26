@@ -5,6 +5,7 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::*;
@@ -25,6 +26,147 @@ const SUPPORT_CATEGORIES: [GUID; 8] = [
         GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
         GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
 ];
+
+// -- IMM32 (.ime) keyboard layout -------------------------------------------
+// Weasel's dual-mode pattern: an E-series KLID under HKLM Keyboard Layouts
+// pointing at our .ime file, then RegisterProfile links the TSF profile to
+// it via hklSubstitute so IMM32 apps (WoW etc.) load the .ime directly.
+
+const IME_FILE_NAME: &str = "r-cantonese.ime";
+const IME_LAYOUT_TEXT: &str = "R-Cantonese";
+
+fn e_series_klid(index: u32) -> String {
+        format!("E0{:02X}{:04X}", index, TEXTSERVICE_LANGID)
+}
+
+/// Scan HKLM Keyboard Layouts for our IME's E-series KLID — weasel's
+/// FindIME. Returns the HKL (KLID as u32) or None.
+fn find_ime_hkl() -> Option<HKL> {
+        unsafe {
+                let base = wide_string("SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts");
+                let mut layouts = HKEY::default();
+                if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(base.as_ptr()), Some(0), KEY_READ, &mut layouts)
+                        != ERROR_SUCCESS
+                {
+                        return None;
+                }
+                let mut found = None;
+                for index in 0x20u32..=0xFF {
+                        let klid = e_series_klid(index);
+                        let sub = wide_string(&klid);
+                        let mut key = HKEY::default();
+                        if RegOpenKeyExW(layouts, PCWSTR(sub.as_ptr()), Some(0), KEY_READ, &mut key)
+                                != ERROR_SUCCESS
+                        {
+                                continue;
+                        }
+                        let mut value = [0u16; 64];
+                        let mut size = (value.len() * 2) as u32;
+                        let mut kind = REG_VALUE_TYPE(0);
+                        let ok = RegQueryValueExW(
+                                key,
+                                w!("Ime File"),
+                                None,
+                                Some(&mut kind),
+                                Some(value.as_mut_ptr() as *mut u8),
+                                Some(&mut size),
+                        );
+                        let _ = RegCloseKey(key);
+                        if ok == ERROR_SUCCESS {
+                                let name = String::from_utf16_lossy(&value[..size as usize / 2])
+                                        .trim_end_matches('\0')
+                                        .to_string();
+                                if name.eq_ignore_ascii_case(IME_FILE_NAME) {
+                                        found = Some(HKL((u32::from_str_radix(&klid, 16).unwrap_or(0)) as *mut _));
+                                        break;
+                                }
+                        }
+                }
+                let _ = RegCloseKey(layouts);
+                found
+        }
+}
+
+/// Install our .ime as an IMM32 keyboard layout. The file must already sit
+/// in the system directory (installer copies it before regsvr32). Returns
+/// the registered HKL. Idempotent — if a KLID already points at our file
+/// we just reuse it.
+fn install_imm32_ime() -> Option<HKL> {
+        if let Some(hkl) = find_ime_hkl() {
+                return Some(hkl);
+        }
+        unsafe {
+                let mut sysdir = [0u16; MAX_PATH as usize];
+                let n = GetSystemDirectoryW(Some(&mut sysdir));
+                if n == 0 || n as usize >= sysdir.len() {
+                        return None;
+                }
+                let path = format!("{}\\{}", String::from_utf16_lossy(&sysdir[..n as usize]), IME_FILE_NAME);
+                if !std::path::Path::new(&path).exists() {
+                        return None;
+                }
+                let file = wide_string(&path);
+                let text = wide_string(IME_LAYOUT_TEXT);
+                let hkl = windows::Win32::UI::Input::Ime::ImmInstallIMEW(
+                        PCWSTR(file.as_ptr()),
+                        PCWSTR(text.as_ptr()),
+                );
+                if !hkl.is_invalid() {
+                        return Some(hkl);
+                }
+                // Manual fallback — ImmInstallIMEW can decline when the E-
+                // series space it wants is taken; scan for a free slot and
+                // write the values directly (weasel's fallback).
+                for index in 0x20u32..=0xFF {
+                        let klid = e_series_klid(index);
+                        let sub = format!("SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\{klid}");
+                        let sub_wide = wide_string(&sub);
+                        let mut key = HKEY::default();
+                        let status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sub_wide.as_ptr()), Some(0), KEY_READ, &mut key);
+                        if status == ERROR_SUCCESS {
+                                let _ = RegCloseKey(key);
+                                continue; // occupied
+                        }
+                        let mut created = HKEY::default();
+                        if RegCreateKeyExW(
+                                HKEY_LOCAL_MACHINE,
+                                PCWSTR(sub_wide.as_ptr()),
+                                Some(0),
+                                PCWSTR::null(),
+                                REG_OPTION_NON_VOLATILE,
+                                KEY_WRITE,
+                                None,
+                                &mut created,
+                                None,
+                        ) != ERROR_SUCCESS
+                        {
+                                continue;
+                        }
+                        let set = |name: &[u16], value: &[u16]| {
+                                let bytes = unsafe {
+                                        std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2)
+                                };
+                                let _ = RegSetValueExW(created, PCWSTR(name.as_ptr()), Some(0), REG_SZ, Some(bytes));
+                        };
+                        set(&wide_string("Ime File"), &wide_string(IME_FILE_NAME));
+                        set(&wide_string("Layout File"), &wide_string("kbdus.dll"));
+                        set(&wide_string("Layout Text"), &wide_string(IME_LAYOUT_TEXT));
+                        let _ = RegCloseKey(created);
+                        return Some(HKL(u32::from_str_radix(&klid, 16).unwrap_or(0) as *mut _));
+                }
+                None
+        }
+}
+
+/// Remove our E-series KLID on uninstall.
+fn uninstall_imm32_ime() {
+        let Some(hkl) = find_ime_hkl() else { return };
+        let klid = format!("{:08X}", hkl.0 as usize as u32);
+        let sub = format!("SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\{klid}");
+        unsafe {
+                let _ = recurse_delete_key(HKEY_LOCAL_MACHINE, &wide_string(&sub));
+        }
+}
 
 fn is_repeat_registration_success(result: &Result<()>) -> bool {
         const TF_E_ALREADY_EXISTS_HR: HRESULT = HRESULT(0x80041F0Au32 as i32);
@@ -100,6 +242,18 @@ pub fn register_profiles() -> bool {
                 // Upstream uses -IDIS_IME — negative icon index = resource id (ExtractIcon convention).
                 let icon_index = (0i32 - globals::TEXTSERVICE_ICON_INDEX as i32) as u32;
 
+                // Link the profile to our IMM32 .ime via an E-series
+                // keyboard layout — IMM32 apps (WoW etc.) load the .ime
+                // directly instead of going through the CTF bridge.
+                let substitute = install_imm32_ime().unwrap_or_default();
+                if !substitute.is_invalid() {
+                        // Re-register so upgrades pick up the substitute —
+                        // RegisterProfile alone early-exits on existing
+                        // profiles and would never update hklSubstitute.
+                        let _ = profile_mgr.UnregisterProfile(&CLSID_RCANTONESE, TEXTSERVICE_LANGID, &GUID_PROFILE, 0);
+                }
+                globals::log(&format!("RegisterProfiles: hklSubstitute = {:?}", substitute));
+
                 let result = profile_mgr.RegisterProfile(
                         &CLSID_RCANTONESE,
                         TEXTSERVICE_LANGID,
@@ -107,7 +261,7 @@ pub fn register_profiles() -> bool {
                         &desc_wide[..desc_wide.len() - 1],
                         &icon_path,
                         icon_index,
-                        HKL::default(),
+                        substitute,
                         0,
                         true,
                         0,
@@ -192,6 +346,7 @@ pub fn install_layout_or_tip(uninstall: bool) {
 
 pub fn unregister_profiles() {
         unsafe {
+                uninstall_imm32_ime();
                 install_layout_or_tip(true);
                 let profile_mgr: ITfInputProcessorProfileMgr = match CoCreateInstance(
                         &CLSID_TF_InputProcessorProfiles,

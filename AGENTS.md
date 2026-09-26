@@ -62,6 +62,18 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 5. **重裝時「提權失敗」提示** — Inno `[Run]` 嘅 `runasoriginaluser` 喺某啲機 spawn 失敗會彈 error dialog；搬咗入 `[Code]` 用 `ExecAsOriginalUser` + 靜默失敗（login autostart 兜底）。
 6. **默認簡體** — code 默認係 Traditional（`settings.rs:74`）；settings.toml 冇嘅話唔會自動寫。**懷疑係嗰部機之前有存「simplified」嘅 toml** — 非 code bug，待確認。
 
+### 🚧 IMM32 `.ime`（WoW 支援，2026-09-28）
+- **根因**：WoW 係 IMM32 app — 揀咗 TIP 之後 Windows 只會俾佢一個鍵盤 layout；`hklSubstitute=NULL` 嘅 profile 只能靠 CTF→IMM bridge，WoW 冇行呢條路 → dll 根本冇被 load（log 冇 activate）
+- **做法照 weasel 雙棲**：`rcantonese-ime` crate → `r-cantonese.ime`（x64 `{sys}`、x86 `{syswow64}`）— 獨立 IMM32 IME，唔係 TSF shim
+- **Exports**：15 個 IMM32 標準 export（`ImeInquire/Select/ProcessKey/ToAsciiEx(=0)/NotifyIME/...`）+ `exports.def`（x86 stdcall 預設 `_name@N` decorated → GetProcAddress 搵唔到，def 保證 undecorated）
+- **ImeInquire**：`IME_PROP_UNICODE | IME_PROP_SPECIAL_UI` — SPECIAL_UI 話俾 app 知唔使畫 IME UI，候選窗我哋自己畫（遊戲都唔會畫）
+- **Message 流**：`ImeProcessKey` 食掣 → 狀態機（session.rs）→ `push_message` 寫 TRANSMSG 入 `hMsgBuf` + `ImmGenerateMessage` 派俾 app window；commit 寫 `hCompStr` result_str + `WM_IME_COMPOSITION(GCS_COMP|GCS_RESULTSTR)` + `WM_IME_ENDCOMPOSITION`
+- **`hCompStr` 陷阱**：`ImmCreateIMCC` **預填 `dwSize=sizeof(COMPOSITIONSTRING)=100`** 唔係 0 — 我哋 CompInfo 要 check `dwCompStrOffset==0` 先 reset（否則 app 讀 result 讀到 header bytes = "d"）
+- **Session**：`HashMap<HIMC, Session>` per-process；engine/db/settings/punctuation/variant 全部 `#[path]` 共享 rcantonese — 冇 COM 依賴
+- **註冊**：`register.rs` `install_imm32_ime()` → `ImmInstallIMEW(sysdir\r-cantonese.ime)` 起 `E0xx0C04` KLID（scan `Ime File` 搵返）→ `RegisterProfile` 用佢做 `hklSubstitute`。**要 UnregisterProfile 先再 RegisterProfile**，否則舊 profile 嘅 substitute 唔更新（TF_E_ALREADY_EXISTS early-exit）
+- **中英切換**：clean Shift tap（keyup 且中途冇其它掣）→ `ImmSetOpenStatus` 反轉；WoW 開 chat box 時自己會 set open
+- **測試**：`cargo test -p r-cantonese-ime` — `immhost.rs` 係 synthetic IMM32 host（真 HWND+IMC+message pump），驗證 commit 字串行到 app
+
 ### ✅ 後續修咗（2026-09-21）
 - **Release 冇候選**：`RCANTONESE_SKIP_ENGINE` gate 寫反 — `cfg!(debug_assertions)` false → else 永遠行 → engine 永遠 None。改返 `is_ok()` 先 skip。
 - **右撳 menu 唔跟 click-away**：經典 Q135788 — popup owner 要 `SetForegroundWindow` 先至有 input focus；仲改埋 owner 做 worker thread 自己起嘅 hidden window（之前 `GetForegroundWindow()` 係外國 thread window，menu 可能閃爍即逝）。**Shell 右撳確實 call `OnClick(TF_LBI_CLK_RIGHT)`，唔係 InitMenu**（log 證實）。

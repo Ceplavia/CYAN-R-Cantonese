@@ -1,0 +1,29 @@
+[package]
+name = "r-cantonese-ime"
+version = "0.9.3"
+edition = "2024"
+
+# IMM32 IME (.ime) companion of the TSF text service — loaded by legacy
+# IMM32 applications (e.g. games) as a keyboard-layout IME. Shares the
+# engine/db/settings modules from rcantonese via #[path] includes so the
+# TSF crate stays untouched.
+[lib]
+name = "r_cantonese_ime"
+# rlib lets `cargo test` drive the IMM32 pipeline in-process.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_SystemServices",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+] }

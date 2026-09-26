@@ -39,10 +39,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; The IME DLL may be loaded in injected processes — restartreplace queues
 ; the new image for the next reboot instead of failing the copy.
 Source: "target\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese.dll"; Flags: restartreplace ignoreversion
+; IMM32 (.ime) front-end — legacy/IMM32 apps (games like WoW) load this
+; directly through the E-series keyboard layout registered by regsvr32.
+Source: "target\release\r_cantonese_ime.dll"; DestDir: "{sys}"; DestName: "r-cantonese.ime"; Flags: restartreplace ignoreversion
 ; 32-bit twin — 32-bit processes can't load a 64-bit COM dll (this is why
 ; injection "failed" in some apps: they were x86). Registered via SysWOW64
 ; regsvr32 → WOW6432Node.
 Source: "target\i686-pc-windows-msvc\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese-x86.dll"; Flags: restartreplace ignoreversion
+Source: "target\i686-pc-windows-msvc\release\r_cantonese_ime.dll"; DestDir: "{syswow64}"; DestName: "r-cantonese.ime"; Flags: restartreplace ignoreversion
 ; restartreplace on the exes too — injected IME hosts respawn the tray on
 ; demand, so it can reappear between our taskkill and the file copy; a
 ; locked exe then queues for reboot instead of popping a DeleteFile error.
