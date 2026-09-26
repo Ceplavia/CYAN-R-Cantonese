@@ -773,26 +773,18 @@ fn elevate_install_locale(langid: u16) -> Result<windows::Win32::Foundation::HAN
         }
 }
 
+// windows-link raw-dylib import — no import lib / GetProcAddress needed.
+windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flags: u32) -> BOOL);
+
 /// InstallLayoutOrTip for our tip under `langid` — must run in the user's
 /// own context (this process is asInvoker, so it is). Also forces the
 /// language into the user's language list when it's missing, otherwise the
 /// tip has nothing to attach to and never appears in the picker.
 fn install_tip_for_user(langid: u16) -> Result<(), String> {
-        use windows::Win32::Foundation::FreeLibrary;
-        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
         unsafe {
-                let module = LoadLibraryW(PCWSTR::from_raw("input.dll\0".as_ptr() as *const u16))
-                        .map_err(|e| format!("{:?}", e.code()))?;
-                let proc_addr = GetProcAddress(module, windows::core::PCSTR::from_raw("InstallLayoutOrTip\0".as_ptr()));
-                let Some(proc_addr) = proc_addr else {
-                        let _ = FreeLibrary(module);
-                        return Err("InstallLayoutOrTip not found".into());
-                };
-                let f: unsafe extern "system" fn(PCWSTR, u32) -> BOOL = std::mem::transmute(proc_addr);
                 let tip = format!("{langid:04X}:{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}");
                 let wide: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
-                if !f(PCWSTR(wide.as_ptr()), 0).as_bool() {
-                        let _ = FreeLibrary(module);
+                if !InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0).as_bool() {
                         return Err("InstallLayoutOrTip failed".into());
                 }
                 // If the language itself isn't in the user's profile list yet,
@@ -801,9 +793,8 @@ fn install_tip_for_user(langid: u16) -> Result<(), String> {
                 if !user_has_language(langid) {
                         let kb = format!("{langid:04X}:00000409");
                         let wide: Vec<u16> = kb.encode_utf16().chain(std::iter::once(0)).collect();
-                        let _ = f(PCWSTR(wide.as_ptr()), 0);
+                        let _ = InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0);
                 }
-                let _ = FreeLibrary(module);
                 Ok(())
         }
 }

@@ -3,7 +3,7 @@
 
 #![allow(non_camel_case_types)]
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::Ime::*;
 
 use crate::globals;

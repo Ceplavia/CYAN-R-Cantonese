@@ -42,21 +42,16 @@ const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
 /// Our input tip — `{langid}:{clsid}{profile_guid}` for InstallLayoutOrTip.
 const INPUT_TIP: &str = "0C04:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
 
+// windows-link raw-dylib import — no import lib / GetProcAddress needed.
+windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flags: u32) -> BOOL);
+
 /// Enable the IME in the user's input list — InstallLayoutOrTip must run in
 /// a non-elevated context (from regsvr32/admin it lands on .DEFAULT), and
 /// the tray runs as the logged-in user at every login anyway.
 fn ensure_input_tip() {
-        use windows::Win32::Foundation::FreeLibrary;
-        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
         unsafe {
-                let Ok(module) = LoadLibraryW(w!("input.dll")) else { return };
-                let Some(proc_addr) = GetProcAddress(module, s!("InstallLayoutOrTip")) else {
-                        let _ = FreeLibrary(module);
-                        return;
-                };
-                let f: unsafe extern "system" fn(PCWSTR, u32) -> BOOL = std::mem::transmute(proc_addr);
                 let wide: Vec<u16> = INPUT_TIP.encode_utf16().chain(Some(0)).collect();
-                let ok = f(PCWSTR(wide.as_ptr()), 0);
+                let ok = InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0);
                 if !ok.as_bool() {
                         log_error("InstallLayoutOrTip failed (tray ensure)");
                 }
@@ -67,11 +62,10 @@ fn ensure_input_tip() {
                 // in Settings — only on machines that lacked the language.
                 if !user_has_language() {
                         let kb: Vec<u16> = "0C04:00000409".encode_utf16().chain(Some(0)).collect();
-                        if !f(PCWSTR(kb.as_ptr()), 0).as_bool() {
+                        if !InstallLayoutOrTip(PCWSTR(kb.as_ptr()), 0).as_bool() {
                                 log_error("InstallLayoutOrTip failed (zh-HK language)");
                         }
                 }
-                let _ = FreeLibrary(module);
         }
 }
 

@@ -24,6 +24,7 @@ version = "0.9.3"
 dependencies = [
  "windows",
  "windows-core 0.62.2",
+ "windows-link 0.100.0",
  "windows-reactor",
  "windows-reactor-setup",
 ]
@@ -111,6 +112,7 @@ dependencies = [
  "embed-resource",
  "windows",
  "windows-core 0.62.2",
+ "windows-link 0.100.0",
 ]
 
 [[package]]
@@ -127,6 +129,7 @@ dependencies = [
  "embed-resource",
  "windows",
  "windows-core 0.62.2",
+ "windows-link 0.100.0",
 ]
 
 [[package]]

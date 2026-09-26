@@ -4,7 +4,7 @@
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
-use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
@@ -309,25 +309,18 @@ fn is_process_elevated() -> bool {
         }
 }
 
+// Static raw-dylib import via windows-link — replaces the LoadLibrary +
+// GetProcAddress + transmute dance. input.dll is present on every
+// supported Windows; the import only resolves when our dll loads, which
+// happens under regsvr32/tray anyway.
+windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flags: u32) -> BOOL);
+
 /// Enable/disable the profile in the user's input list via
 /// input.dll!InstallLayoutOrTip — weasel's mechanism; surgical, never
 /// rewrites the whole language list (that drops other IMEs' tips).
 pub fn install_layout_or_tip(uninstall: bool) {
         const ILOT_UNINSTALL: u32 = 0x1;
         unsafe {
-                let module = match LoadLibraryW(w!("input.dll")) {
-                        Ok(m) => m,
-                        Err(e) => {
-                                globals::log_error(&format!("InstallLayoutOrTip: input.dll load failed {e:?}"));
-                                return;
-                        }
-                };
-                let Some(proc_addr) = GetProcAddress(module, s!("InstallLayoutOrTip")) else {
-                        globals::log_error("InstallLayoutOrTip: proc not found");
-                        let _ = FreeLibrary(module);
-                        return;
-                };
-                let f: unsafe extern "system" fn(PCWSTR, u32) -> BOOL = std::mem::transmute(proc_addr);
                 let title = format!(
                         "{:04X}:{}{}",
                         TEXTSERVICE_LANGID,
@@ -336,11 +329,10 @@ pub fn install_layout_or_tip(uninstall: bool) {
                 );
                 let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
                 let flags = if uninstall { ILOT_UNINSTALL } else { 0 };
-                let ok = f(PCWSTR(wide.as_ptr()), flags);
+                let ok = InstallLayoutOrTip(PCWSTR(wide.as_ptr()), flags);
                 if !ok.as_bool() {
                         globals::log_error(&format!("InstallLayoutOrTip(uninstall={uninstall}) failed"));
                 }
-                let _ = FreeLibrary(module);
         }
 }
 
