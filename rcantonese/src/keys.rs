@@ -351,7 +351,17 @@ fn key_state_handler(
                         handle_composition_input(state, processor, ec, context, input_key, is_shifting)
                 }
                 (C::Composing, F::FinalizeTextStore) => {
-                        if code == crate::keytable::VK_RETURN || code == crate::keytable::VK_SPACE {
+                        if code == crate::keytable::VK_SPACE && is_shifting {
+                                // Shift+Space types a literal space: finalize the
+                                // raw composition first, then emit a space char
+                                // (full-width 0x3000 when char form is full).
+                                handle_composition_finalize_raw(state, ec, context)?;
+                                let full = thread_compartment(state, globals::GUID_COMPARTMENT_CHARACTER_FORM)
+                                        .get_bool()
+                                        .unwrap_or(false);
+                                let space = if full { 0x3000u16 } else { 0x20u16 };
+                                composition::add_char_and_finalize(ec, context, &[space])
+                        } else if code == crate::keytable::VK_RETURN || code == crate::keytable::VK_SPACE {
                                 handle_composition_finalize_raw(state, ec, context)
                         } else {
                                 handle_composition_finalize(state, ec, context, false)

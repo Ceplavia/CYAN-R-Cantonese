@@ -43,8 +43,11 @@ Source: "target\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantone
 ; injection "failed" in some apps: they were x86). Registered via SysWOW64
 ; regsvr32 → WOW6432Node.
 Source: "target\i686-pc-windows-msvc\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese-x86.dll"; Flags: restartreplace ignoreversion
-Source: "target\release\r-cantonese-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "target\release\config-center.exe"; DestDir: "{app}"; Flags: ignoreversion
+; restartreplace on the exes too — injected IME hosts respawn the tray on
+; demand, so it can reappear between our taskkill and the file copy; a
+; locked exe then queues for reboot instead of popping a DeleteFile error.
+Source: "target\release\r-cantonese-tray.exe"; DestDir: "{app}"; Flags: restartreplace ignoreversion
+Source: "target\release\config-center.exe"; DestDir: "{app}"; Flags: restartreplace ignoreversion
 Source: "rcantonese\ime.sqlite3"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 ; WinUI3 self-contained runtime for config-center (en-US + zh locales only).
 Source: "target\release\Microsoft.*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

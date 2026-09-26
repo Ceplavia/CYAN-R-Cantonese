@@ -639,7 +639,7 @@ impl Component for ConfigCenter {
                                         View::from(footer.clone()),
                                 ))
                                 .into(),
-                        _ => StackPanel::new()
+                        3 => StackPanel::new()
                                 .spacing(12.0)
                                 .margin(Thickness::uniform(20.0))
                                 .children((
@@ -682,6 +682,19 @@ impl Component for ConfigCenter {
                                         View::from(footer.clone()),
                                 ))
                                 .into(),
+                        _ => StackPanel::new()
+                                .spacing(12.0)
+                                .margin(Thickness::uniform(20.0))
+                                .children((
+                                        TextBlock::new().text("CYAN-R-Cantonese").font_size(22.0),
+                                        TextBlock::new().text(concat!("v", env!("CARGO_PKG_VERSION"))),
+                                        TextBlock::new().text_wrapping(TextWrapping::Wrap).text(self.t(
+                                                "A Cantonese Jyutping input method for Windows, reimplemented in Rust.",
+                                                "用 Rust 實現嘅 Windows 粵拼輸入法。",
+                                        )),
+                                        TextBlock::new().text_wrapping(TextWrapping::Wrap).text("github.com/Ceplavia/CYAN-R-Cantonese"),
+                                ))
+                                .into(),
                 };
 
                 let nav_item = |tag: &str, text: &str| {
@@ -711,6 +724,7 @@ impl Component for ConfigCenter {
                                                 nav_item("1", &self.t("Hotkeys", "快捷鍵")),
                                                 nav_item("2", &self.t("Language", "語言")),
                                                 nav_item("3", &self.t("Advanced", "進階")),
+                                                nav_item("4", &self.t("About", "關於")),
                                         ],
                                 ),
                                 SlotView::new(
