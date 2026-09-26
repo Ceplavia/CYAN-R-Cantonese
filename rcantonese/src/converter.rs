@@ -79,6 +79,28 @@ pub fn transform(database: &ImeDatabase, lexicons: &[Lexicon], romanization_form
                 };
 
                 let candidate = Candidate::new(lexicon.clone(), display_text, romanization_form, composed_comment);
+                // Weasel-style merge: a character with multiple readings
+                // shows once — all romanizations join the comment
+                // (「上 soeng6/soeng5」 instead of two rows).
+                if candidate.lexicon.is_cantonese() {
+                        if let Some(existing) = result
+                                .iter_mut()
+                                .find(|c: &&mut Candidate| c.lexicon.is_cantonese() && c.text == candidate.text)
+                        {
+                                if let Some(reading) = candidate.comment {
+                                        match &mut existing.comment {
+                                                Some(comment) => {
+                                                        if !comment.split('/').any(|r| r == reading) {
+                                                                comment.push('/');
+                                                                comment.push_str(&reading);
+                                                        }
+                                                }
+                                                none => *none = Some(reading),
+                                        }
+                                }
+                                continue;
+                        }
+                }
                 if !result.contains(&candidate) {
                         result.push(candidate);
                 }
