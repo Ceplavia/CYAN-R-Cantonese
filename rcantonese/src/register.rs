@@ -112,6 +112,7 @@ fn install_imm32_ime() -> Option<HKL> {
                         PCWSTR(text.as_ptr()),
                 );
                 if !hkl.0.is_null() {
+                        set_base_layout_substitute(&format!("{:08X}", hkl.0 as usize as u32));
                         return Some(hkl);
                 }
                 // ImmInstallIMEW returns NULL on failure — HKL::is_invalid
@@ -161,6 +162,10 @@ fn install_imm32_ime() -> Option<HKL> {
                         // can't be activated by CTF substitution or
                         // LoadKeyboardLayout at all.
                         add_ime_to_preload(&klid);
+                        // Legacy Substitutes map: activating the base zh-HK
+                        // keyboard yields our IME instead — the classic way
+                        // IMM32 apps (WoW/EVE) load .ime files.
+                        set_base_layout_substitute(&klid);
                         return Some(HKL(u32::from_str_radix(&klid, 16).unwrap_or(0) as *mut _));
                 }
                 None
@@ -213,6 +218,76 @@ fn uninstall_imm32_ime() {
                 let _ = recurse_delete_key(HKEY_LOCAL_MACHINE, &wide_string(&sub));
         }
         remove_ime_from_preload(&klid);
+        remove_base_layout_substitute();
+}
+
+/// Map the langid's base keyboard layout (e.g. 00000C04 for zh-HK) to
+/// our E-KLID via HKCU\Keyboard Layout\Substitutes — legacy activation
+/// path for IMM32 apps. Proven on 09-28: without this the .ime never
+/// loads even though the KLID + Preload entries exist.
+fn set_base_layout_substitute(klid: &str) {
+        let base = format!("{:08x}", TEXTSERVICE_LANGID);
+        let path = wide_string("Keyboard Layout\\Substitutes");
+        let mut key = HKEY::default();
+        unsafe {
+                if RegCreateKeyExW(
+                        HKEY_CURRENT_USER,
+                        PCWSTR(path.as_ptr()),
+                        Some(0),
+                        PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_WRITE,
+                        None,
+                        &mut key,
+                        None,
+                ) != ERROR_SUCCESS
+                {
+                        globals::log_error("IME01: Substitutes key create failed");
+                        return;
+                }
+                let name = wide_string(&base);
+                let value = wide_string(&klid.to_uppercase());
+                let bytes = std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2);
+                let ok = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_SZ, Some(bytes));
+                globals::log_error(&format!("IME01: Substitutes[{base}]={klid} set={ok:?}"));
+                let _ = RegCloseKey(key);
+        }
+}
+
+/// Drop our substitution on the base layout (restore whatever was there
+/// is not possible — just delete; US-keyboard substitutes regenerate).
+fn remove_base_layout_substitute() {
+        let base = format!("{:08x}", TEXTSERVICE_LANGID);
+        let path = wide_string("Keyboard Layout\\Substitutes");
+        let mut key = HKEY::default();
+        unsafe {
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), Some(0), KEY_READ | KEY_WRITE, &mut key)
+                        != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let mut buf = [0u16; 16];
+                let mut size = (buf.len() * 2) as u32;
+                let name = wide_string(&base);
+                if RegQueryValueExW(
+                        key,
+                        PCWSTR(name.as_ptr()),
+                        None,
+                        None,
+                        Some(buf.as_mut_ptr() as *mut u8),
+                        Some(&mut size),
+                ) == ERROR_SUCCESS
+                {
+                        let val = String::from_utf16_lossy(&buf[..size as usize / 2])
+                                .trim_end_matches('\0')
+                                .to_string();
+                        // Only remove if it still points at our KLID.
+                        if val.to_uppercase().starts_with('E') {
+                                let _ = RegDeleteValueW(key, PCWSTR(name.as_ptr()));
+                        }
+                }
+                let _ = RegCloseKey(key);
+        }
 }
 
 /// Drop our KLID from HKCU\Keyboard Layout\Preload.
