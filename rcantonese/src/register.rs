@@ -112,7 +112,8 @@ fn install_imm32_ime() -> Option<HKL> {
                         PCWSTR(text.as_ptr()),
                 );
                 if !hkl.0.is_null() {
-                        set_base_layout_substitute(&format!("{:08X}", hkl.0 as usize as u32));
+                        // Real install — the layout is a genuine IME; no
+                        // Substitutes hack needed.
                         return Some(hkl);
                 }
                 // ImmInstallIMEW returns NULL on failure — HKL::is_invalid
@@ -121,8 +122,10 @@ fn install_imm32_ime() -> Option<HKL> {
                 globals::log_error("IME01: ImmInstallIMEW failed, manual KLID fallback");
                 // Manual fallback — ImmInstallIMEW can decline when the E-
                 // series space it wants is taken; scan for a free slot and
-                // write the values directly (weasel's fallback).
-                for index in 0u32..=0xFF {
+                // write the values directly (weasel's fallback). E020..E0FF
+                // is the user-IME range — E000..E01F is reserved for system
+                // IMEs (immdev/imm.h MIN_USER_IMM_IME_ID).
+                for index in 0x20u32..=0xFF {
                         let klid = e_series_klid(index);
                         let sub = format!("SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\{klid}");
                         let sub_wide = wide_string(&sub);
@@ -404,16 +407,7 @@ pub fn register_profiles() -> bool {
                 // Link the profile to our IMM32 .ime via an E-series
                 // keyboard layout — IMM32 apps (WoW etc.) load the .ime
                 // directly instead of going through the CTF bridge.
-                // Ensure the .ime side exists (KLID + Preload + Substitutes)
-                // but hand CTF the BASE layout klid — legacy activation
-                // resolves through Keyboard Layout\Substitutes into our
-                // IME. Passing the E-KLID directly fails: Windows loads it
-                // as a plain keyboard, never as an IME (09-28 verified).
-                let _ = install_imm32_ime();
-                // The loaded HKL of our IME-under-substitutes: (langid<<16)|langid.
-                // Substitutes[00000c04]=E-klid binds this handle to our .ime.
-                let hkl_val = ((TEXTSERVICE_LANGID as isize) << 16) | TEXTSERVICE_LANGID as isize;
-                let substitute = HKL(hkl_val as *mut _);
+                let substitute = install_imm32_ime().unwrap_or_default();
                 if !substitute.is_invalid() {
                         // Re-register so upgrades pick up the substitute —
                         // RegisterProfile alone early-exits on existing

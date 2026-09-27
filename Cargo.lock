@@ -119,6 +119,7 @@ dependencies = [
 name = "r-cantonese-ime"
 version = "0.9.3"
 dependencies = [
+ "embed-resource",
  "windows",
 ]
 
