@@ -504,11 +504,12 @@ impl CandidateListPresenter {
 
         /// Deferred tail of start() — runs on the UI thread via the refresh
         /// window, after the edit session released the document lock.
-        /// `pbShow` from BeginUIElement tells whether the APP renders the
-        /// candidate UI itself (Chromium does): then we never create ours.
+        /// `pbShow` from BeginUIElement is advisory only — we draw our own
+        /// window regardless: apps that report true (Chromium) rely on the
+        /// framework's candidate UI which never actually renders for our
+        /// element, so honoring it produced no window at all (0.9.3).
         pub fn deferred_begin(this: &ComObject<CandidateListPresenter>) {
                 let presenter = this.get();
-                let mut app_shows = false;
                 if let Some(ui_mgr) = presenter.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                         let element: ITfUIElement = this.to_interface();
                         let mut show = BOOL(0);
@@ -522,18 +523,10 @@ impl CandidateListPresenter {
                                 }
                         }
                         globals::log(&format!("BeginUIElement ok: show={} id={id}", show.as_bool()));
-                        app_shows = show.as_bool();
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
-                        if !app_shows {
+                        if !show.as_bool() {
                                 presenter.updated_flags.store(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
                         }
-                }
-                if app_shows {
-                        // The app renders the candidate list itself — honor it
-                        // and stay invisible (previously we always drew ours).
-                        presenter.is_show_mode.store(false, Ordering::Relaxed);
-                        globals::log("candidate UI: app-managed (pbShow=true)");
-                        return;
                 }
                 presenter.is_show_mode.store(true, Ordering::Relaxed);
                 match CandidateWindow::create(HWND::default(), presenter.page_size, presenter.window_state.clone()) {
