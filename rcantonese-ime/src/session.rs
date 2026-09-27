@@ -860,10 +860,10 @@ impl Session {
                 self.mode = Mode::Options;
                 self.items = self.options_items();
                 self.selection = 0;
-                position_window(self.imc(), false);
-                let preedit = self.preedit_text();
-                let ps = self.items.len();
-                ui::show_candidates(&self.items, self.selection, &self.settings, &preedit, ps);
+                // Same one-shot anchoring as compositions — defer the first
+                // paint to post-deliver resolve_anchor (allow_tsf=true) so
+                // the menu opens at the real caret, not a stale/form pos.
+                self.needs_anchor = true;
         }
 
         fn close_options(&mut self) {
@@ -1333,19 +1333,18 @@ pub fn on_notify(himc: HIMC, action: u32, index: u32, value: u32) {
 /// lifetime. Outside the session lock — tsfbridge's RequestEditSession
 /// must never run under SESSIONS (host text store re-enters our exports).
 fn resolve_anchor(himc: HIMC) {
-        let need_anchor =
-                with_session(himc, |s| s.composing && s.needs_anchor).unwrap_or(false);
+        let need_anchor = with_session(himc, |s| s.needs_anchor).unwrap_or(false);
         if !need_anchor {
                 return;
         }
         position_window(himc, true);
         with_session(himc, |s| {
                 s.needs_anchor = false;
-                // First paint of the composition was deferred in sync() —
-                // show now that the anchor is real.
+                // First paint was deferred (composition sync, options menu)
+                // — show now that the anchor is real.
                 let preedit = s.preedit_text();
                 if !s.app_managed_ui && (!s.items.is_empty() || !preedit.is_empty()) {
-                        let ps = s.page_size();
+                        let ps = if s.mode == Mode::Options { s.items.len() } else { s.page_size() };
                         ui::show_candidates(&s.items, s.selection, &s.settings, &preedit, ps);
                 }
         });
