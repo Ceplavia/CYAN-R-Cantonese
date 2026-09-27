@@ -2,6 +2,7 @@
 // TSF (Text Services Framework) in-process COM DLL.
 
 mod candidate;
+mod candview;
 mod compartment;
 mod composition;
 mod config;

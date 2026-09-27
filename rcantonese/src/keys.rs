@@ -950,72 +950,19 @@ fn handle_composition_character_form(state: &mut ServiceState, ec: u32, context:
 // A candidate-window menu toggled by Ctrl+`: digits select, Esc closes.
 // ---------------------------------------------------------------------
 
-/// Port of _BuildOptionsRows — the ten rows, `✓` on the active choice.
+/// Port of _BuildOptionsRows — rows come from the shared candview model so
+/// the IMM32 menu renders identically.
 fn options_rows(processor: &std::sync::Arc<Mutex<Processor>>) -> Vec<CandidateItem> {
-        use crate::settings::*;
-        use crate::variants::CharacterVariant;
-        use crate::strings::*;
         let p = processor.lock().unwrap_or_else(|e| e.into_inner());
-        let variant = p.current_character_variant();
-        let form = p.current_character_form();
-        let punct = p.current_punctuation_form();
-        let mode = p.current_input_method_mode();
-        let _ = mode; // input-mode rows removed — Shift toggles it directly
-        let selected = [
-                variant == CharacterVariant::HongKong,
-                variant == CharacterVariant::Taiwan,
-                variant == CharacterVariant::Simplified,
-                form == CharacterForm::HalfWidth,
-                form == CharacterForm::FullWidth,
-                punct == PunctuationForm::Cantonese,
-                punct == PunctuationForm::English,
-        ];
-        let ids = [
-                IDS_OPTIONS_CHARACTER_VARIANT_HONG_KONG,
-                IDS_OPTIONS_CHARACTER_VARIANT_TAIWAN,
-                IDS_OPTIONS_CHARACTER_VARIANT_SIMPLIFIED,
-                IDS_OPTIONS_CHARACTER_FORM_HALF_WIDTH,
-                IDS_OPTIONS_CHARACTER_FORM_FULL_WIDTH,
-                IDS_OPTIONS_PUNCTUATION_FORM_CANTONESE,
-                IDS_OPTIONS_PUNCTUATION_FORM_ENGLISH,
-        ];
-        let fallbacks = [
-                "Traditional Chinese (Hong Kong)",
-                "Traditional Chinese (Taiwan)",
-                "Simplified Chinese",
-                "Half-width Symbols",
-                "Full-width Symbols",
-                "Chinese Punctuation",
-                "English Punctuation",
-        ];
-        let sep = || CandidateItem { text: String::new(), comment: String::new(), input_count: 0, separator: true };
-        let mut items: Vec<CandidateItem> = (0..3)
-                .map(|i| CandidateItem {
-                        text: text(ids[i]).unwrap_or(fallbacks[i]).to_string(),
-                        comment: if selected[i] { "\u{2713}".to_string() } else { String::new() },
+        crate::candview::options_rows(&p.settings)
+                .into_iter()
+                .map(|r| CandidateItem {
+                        text: r.text,
+                        comment: r.comment,
                         input_count: 0,
-                        separator: false,
+                        separator: r.separator,
                 })
-                .collect();
-        items.push(sep());
-        for i in 3..5 {
-                items.push(CandidateItem {
-                        text: text(ids[i]).unwrap_or(fallbacks[i]).to_string(),
-                        comment: if selected[i] { "\u{2713}".to_string() } else { String::new() },
-                        input_count: 0,
-                        separator: false,
-                });
-        }
-        items.push(sep());
-        for i in 5..7 {
-                items.push(CandidateItem {
-                        text: text(ids[i]).unwrap_or(fallbacks[i]).to_string(),
-                        comment: if selected[i] { "\u{2713}".to_string() } else { String::new() },
-                        input_count: 0,
-                        separator: false,
-                });
-        }
-        items
+                .collect()
 }
 
 /// Port of ToggleOptionsMode.
@@ -1096,24 +1043,18 @@ fn handle_options_select(state: &mut ServiceState, ec: u32, context: &ITfContext
                 return Err(Error::from_hresult(E_UNEXPECTED));
         };
         {
-                use crate::settings::*;
-                use crate::variants::CharacterVariant;
                 let mut p = processor.lock().unwrap_or_else(|e| e.into_inner());
-                match pos {
-                        0 => {
-                                p.set_character_variant(CharacterVariant::HongKong);
+                match crate::candview::options_choice(pos) {
+                        Some(crate::candview::OptionsChoice::Variant(v)) => {
+                                p.set_character_variant(v);
                         }
-                        1 => {
-                                p.set_character_variant(CharacterVariant::Taiwan);
+                        Some(crate::candview::OptionsChoice::Form(f)) => {
+                                p.set_character_form(f, &thread_mgr);
                         }
-                        2 => {
-                                p.set_character_variant(CharacterVariant::Simplified);
+                        Some(crate::candview::OptionsChoice::Punct(pf)) => {
+                                p.set_punctuation_form(pf, &thread_mgr);
                         }
-                        3 => p.set_character_form(CharacterForm::HalfWidth, &thread_mgr),
-                        4 => p.set_character_form(CharacterForm::FullWidth, &thread_mgr),
-                        5 => p.set_punctuation_form(PunctuationForm::Cantonese, &thread_mgr),
-                        6 => p.set_punctuation_form(PunctuationForm::English, &thread_mgr),
-                        _ => {}
+                        None => {}
                 }
         }
         handle_options_close(state, ec, context)
@@ -1282,11 +1223,7 @@ fn handle_phrase_select_by_number(
 /// Port of CCandidateRange::GetIndex — map a key code to a page position.
 fn candidate_index_from_code(processor: &std::sync::Arc<Mutex<Processor>>, code: u32) -> Option<usize> {
         let processor = processor.lock().unwrap_or_else(|p| p.into_inner());
-        let range = processor.keys.candidate_list_index_range();
-        let digit = match code {
-                0x30..=0x39 => code - 0x30,
-                0x60..=0x69 => code - 0x60,
-                _ => return None,
-        };
-        range.iter().position(|&k| k == digit)
+        // The modifier guard already ran in test_key (unmodified digits
+        // only reach here) — pass 0 for the check inside options_digit.
+        crate::candview::options_digit(code, 0, processor.keys.candidate_list_index_range())
 }

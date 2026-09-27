@@ -193,14 +193,19 @@ pub fn log_error(message: &str) {
 }
 
 fn write_log_line(message: &str) {
+        // Timestamp + pid — the log is shared across every injected process,
+        // and WoW-vs-Devin diagnosis is hopeless without both.
+        let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        let stamp = format!("{:02}:{:02}:{:02}.{:03}", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        let line = format!("{stamp} [{}] {message}", std::process::id());
         if let Some(path) = log_file_path() {
                 use std::io::Write;
                 if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                        let _ = writeln!(file, "{message}");
+                        let _ = writeln!(file, "{line}");
                 }
         }
         unsafe {
-                let wide: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+                let wide: Vec<u16> = line.encode_utf16().chain(Some(0)).collect();
                 windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(windows::core::PCWSTR(wide.as_ptr()));
         }
 }

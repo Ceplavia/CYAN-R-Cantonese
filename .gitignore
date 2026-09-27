@@ -3,6 +3,7 @@ target/
 
 # Generated dictionary DB (rebuild: cargo run -p preparing)
 rcantonese/ime.sqlite3
+rcantonese-ime/ime.sqlite3
 
 # Debug symbols
 *.pdb

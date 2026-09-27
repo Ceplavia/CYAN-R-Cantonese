@@ -46,6 +46,8 @@ struct CandidateWindowState {
         items: Vec<CandidateItem>,
         selection: usize,
         page_start_indices: Vec<usize>,
+        /// Uniform page size — mirrored for the shared candview calls.
+        page_size: usize,
         text_color: u32,
         back_color: u32,
         select_color: u32,
@@ -55,12 +57,39 @@ struct CandidateWindowState {
         comment_font_size: u32,
 }
 
+impl crate::candview::RowLike for crate::processor::CandidateItem {
+        fn row_text(&self) -> &str {
+                &self.text
+        }
+        fn row_comment(&self) -> &str {
+                &self.comment
+        }
+        fn row_separator(&self) -> bool {
+                self.separator
+        }
+}
+
+impl CandidateWindowState {
+        fn view_style(&self) -> crate::candview::Style {
+                crate::candview::Style {
+                        candidate_font_size: self.candidate_font_size,
+                        number_font_size: self.number_font_size,
+                        comment_font_size: self.comment_font_size,
+                        text_color: self.text_color,
+                        back_color: self.back_color,
+                        select_color: self.select_color,
+                        comment_color: self.comment_color,
+                }
+        }
+}
+
 impl CandidateWindowState {
         fn count(&self) -> u32 {
                 self.items.len() as u32
         }
 
         fn rebuild_pages(&mut self, page_size: usize) {
+                self.page_size = page_size.max(1);
                 self.page_start_indices.clear();
                 let page_size = page_size.max(1);
                 let mut start = 0;
@@ -273,29 +302,9 @@ impl CandidateWindow {
         }
 
         /// Clamp a candidate-window rect inside the nearest monitor's work
-        /// area. When there's no room below the caret, flip the window above
-        /// the caret line like other IMEs do.
+        /// area — shared implementation lives in candview.
         fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, caret_top: i32) -> (i32, i32) {
-                unsafe {
-                        let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
-                        let mut info = MONITORINFO {
-                                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                                ..Default::default()
-                        };
-                        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-                                return (x, y);
-                        }
-                        let work = info.rcWork;
-                        let nx = x.clamp(work.left, (work.right - w).max(work.left));
-                        let mut ny = if y + h > work.bottom { caret_top - h - 2 } else { y };
-                        if ny < work.top {
-                                ny = work.top;
-                        }
-                        if ny + h > work.bottom {
-                                ny = (work.bottom - h).max(work.top);
-                        }
-                        (nx, ny)
-                }
+                crate::candview::clamp_to_work_area(x, y, w, h, caret_top)
         }
 
         fn move_to(&self, rect: RECT) {
@@ -325,92 +334,30 @@ impl Drop for CandidateWindow {
         }
 }
 
-fn row_height(state: &CandidateWindowState) -> i32 {
-        state.candidate_font_size.max(state.comment_font_size).max(state.number_font_size) as i32 + 10
-}
+// Rendering goes through the shared candview module — the IMM32 popup
+// paints the same rows, fonts and colors.
 
-fn make_font(size: u32) -> HFONT {
-        unsafe {
-                CreateFontW(
-                        -(size as i32),
-                        0,
-                        0,
-                        0,
-                        FW_NORMAL.0 as i32,
-                        0,
-                        0,
-                        0,
-                        DEFAULT_CHARSET,
-                        OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS,
-                        CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
-                        w!("Microsoft JhengHei"),
-                )
-        }
-}
-
-/// Measure `text` under `font` — caller manages the DC and restores fonts.
-unsafe fn text_width(hdc: HDC, font: HFONT, text: &[u16]) -> i32 {
-        unsafe {
-                if text.is_empty() {
-                        return 0;
-                }
-                let old = SelectObject(hdc, font.into());
-                let mut size = SIZE::default();
-                let _ = GetTextExtentPoint32W(hdc, text, &mut size);
-                SelectObject(hdc, old);
-                size.cx
-        }
-}
-
-fn measure_height(state: &CandidateWindowState, page_size: usize) -> u32 {
-        let page = state.current_page();
-        let rows = state
-                .page_bounds(page)
-                .map(|(s, e)| e - s + 1)
-                .unwrap_or(0)
-                .min(page_size.max(1));
-        (rows.max(1) as i32 * row_height(state) + 8) as u32
+fn measure_height(state: &CandidateWindowState, _page_size: usize) -> u32 {
+        crate::candview::measure_height(
+                state.items.len(),
+                state.selection,
+                state.page_size,
+                &state.view_style(),
+                "",
+        ) as u32
 }
 
 fn measure_width(state: &CandidateWindowState, hwnd: HWND) -> u32 {
-        let page = state.current_page();
-        let Some((start, end)) = state.page_bounds(page) else { return 120 };
-        let end = end.min(state.items.len().saturating_sub(1));
-        if state.items.is_empty() || start > end {
-                return 120;
-        }
-        // Measure on the candidate window's own DC — its DPI context matches
-        // the BeginPaint DC used by paint_candidates. GetDC(None) (screen DC)
-        // can resolve the font at a different DPI in some host processes,
-        // which made Notepad measure ~30% too narrow and clip comments.
-        unsafe {
-                let hdc = GetDC(Some(hwnd));
-                if hdc.is_invalid() {
-                        return 200;
-                }
-                let num_font = make_font(state.number_font_size);
-                let cand_font = make_font(state.candidate_font_size);
-                let cmt_font = make_font(state.comment_font_size);
-                let mut max_cx = 40i32;
-                for (index, item) in state.items[start..=end].iter().enumerate() {
-                        let label: Vec<u16> = format!("{}.", index + 1 - start).encode_utf16().collect();
-                        let text: Vec<u16> = format!(" {}", item.text).encode_utf16().collect();
-                        let comment: Vec<u16> = format!("  {}", item.comment).encode_utf16().collect();
-                        let cx = text_width(hdc, num_font, &label)
-                                + text_width(hdc, cand_font, &text)
-                                + text_width(hdc, cmt_font, &comment);
-                        max_cx = max_cx.max(cx);
-                }
-                let _ = DeleteObject(num_font.into());
-                let _ = DeleteObject(cand_font.into());
-                let _ = DeleteObject(cmt_font.into());
-                let _ = ReleaseDC(Some(hwnd), hdc);
-                let width = (max_cx + 16) as u32;
-                globals::log(&format!("measure_width: items={} max_cx={max_cx} w={width}", state.items.len()));
-                width
-        }
+        let width = crate::candview::measure_width(
+                hwnd,
+                &state.items,
+                state.selection,
+                state.page_size,
+                &state.view_style(),
+                "",
+        ) as u32;
+        globals::log(&format!("measure_width: items={} w={width}", state.items.len()));
+        width
 }
 
 unsafe extern "system" fn candidate_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -440,112 +387,12 @@ unsafe extern "system" fn candidate_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
 fn paint_candidates(hwnd: HWND, hdc: HDC) {
         // The window state lives in the presenter; this is reached through
         // GWLP_USERDATA pointing at the presenter-shared state if set.
-        unsafe {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Mutex<CandidateWindowState>;
-                if ptr.is_null() {
-                        return;
-                }
-                let state = &*ptr;
-                let state = state.lock().unwrap_or_else(|e| e.into_inner());
-                // Paint the background — the class brush is system COLOR_WINDOW;
-                // the configured back color overrides it here.
-                {
-                        let mut client = RECT::default();
-                        let _ = GetClientRect(hwnd, &mut client);
-                        let brush = CreateSolidBrush(COLORREF(state.back_color));
-                        FillRect(hdc, &client, brush);
-                        let _ = DeleteObject(brush.into());
-                }
-                let rh = row_height(&state);
-                let page = state.current_page();
-                let Some((start, end)) = state.page_bounds(page) else { return };
-                let num_font = make_font(state.number_font_size);
-                let cand_font = make_font(state.candidate_font_size);
-                let cmt_font = make_font(state.comment_font_size);
-                // Restore the DC's original font before deleting ours —
-                // DeleteObject on a still-selected font fails silently.
-                let mut orig_font = HGDIOBJ::default();
-                // Track the true rendered right edge on the paint DC — its DPI
-                // context is authoritative; if the window is too narrow we
-                // resize below instead of trusting an off-DC measurement.
-                let mut max_right = 0i32;
-                let mut shown = 0usize; // numbering counts only non-separator rows
-                for (i, index) in (start..=end).enumerate() {
-                        let Some(item) = state.items.get(index) else { break };
-                        let y = 4 + i as i32 * rh;
-                        let mut rc = RECT { left: 0, top: y, right: 4096, bottom: y + rh };
-                        if item.separator {
-                                // Divider line across the row, vertically centered.
-                                let pen = CreatePen(PS_SOLID, 1, COLORREF(state.comment_color));
-                                let old_pen = SelectObject(hdc, pen.into());
-                                let mid = y + rh / 2;
-                                let mut client = RECT::default();
-                                let _ = GetClientRect(hwnd, &mut client);
-                                let _ = MoveToEx(hdc, 8, mid, None);
-                                let _ = LineTo(hdc, client.right - 8, mid);
-                                SelectObject(hdc, old_pen);
-                                let _ = DeleteObject(pen.into());
-                                continue;
-                        }
-                        shown += 1;
-                        if index == state.selection {
-                                let brush = CreateSolidBrush(COLORREF(state.select_color));
-                                FillRect(hdc, &rc, brush);
-                                let _ = DeleteObject(brush.into());
-                        }
-                        SetBkMode(hdc, TRANSPARENT);
-                        let mut x = 8;
-                        // "N." — number font
-                        let mut label: Vec<u16> = format!("{}.", shown).encode_utf16().collect();
-                        SetTextColor(hdc, COLORREF(state.text_color));
-                        if orig_font.is_invalid() {
-                                orig_font = SelectObject(hdc, num_font.into());
-                        } else {
-                                SelectObject(hdc, num_font.into());
-                        }
-                        rc.left = x;
-                        DrawTextW(hdc, &mut label, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                        x += text_width(hdc, num_font, &label);
-                        // " candidate" — candidate font
-                        let mut wide: Vec<u16> = format!(" {}", item.text).encode_utf16().collect();
-                        SelectObject(hdc, cand_font.into());
-                        rc.left = x;
-                        DrawTextW(hdc, &mut wide, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                        x += text_width(hdc, cand_font, &wide);
-                        // "  comment" — comment font
-                        if !item.comment.is_empty() {
-                                let mut comment: Vec<u16> = format!("  {}", item.comment).encode_utf16().collect();
-                                SelectObject(hdc, cmt_font.into());
-                                rc.left = x;
-                                SetTextColor(hdc, COLORREF(state.comment_color));
-                                DrawTextW(hdc, &mut comment, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                                x += text_width(hdc, cmt_font, &comment);
-                        }
-                        max_right = max_right.max(x);
-                }
-                if !orig_font.is_invalid() {
-                        SelectObject(hdc, orig_font);
-                }
-                let _ = DeleteObject(num_font.into());
-                let _ = DeleteObject(cand_font.into());
-                let _ = DeleteObject(cmt_font.into());
-                // Self-correct the window width using the real rendered extent.
-                let needed = max_right + 8;
-                let mut client = RECT::default();
-                let _ = GetClientRect(hwnd, &mut client);
-                if needed > client.right - client.left {
-                        let mut wr = RECT::default();
-                        let _ = GetWindowRect(hwnd, &mut wr);
-                        let (nx, _) = CandidateWindow::clamp_to_work_area(
-                                wr.left,
-                                wr.top,
-                                needed + 4,
-                                wr.bottom - wr.top,
-                                wr.top,
-                        );
-                        let _ = MoveWindow(hwnd, nx, wr.top, needed + 4, wr.bottom - wr.top, true);
-                }
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Mutex<CandidateWindowState> };
+        if ptr.is_null() {
+                return;
         }
+        let state = unsafe { &*ptr }.lock().unwrap_or_else(|e| e.into_inner());
+        crate::candview::paint(hwnd, hdc, &state.items, state.selection, state.page_size, &state.view_style(), "");
 }
 
 // ---------------------------------------------------------------------
@@ -571,6 +418,9 @@ pub struct CandidateListPresenter {
         is_show_mode: AtomicBool,
         layout_sink_cookie: AtomicU32,
         edit_cookie: AtomicU32,
+        /// Self IUnknown so &self methods can enqueue deferred UI ops with a
+        /// strong ref — see DEFERRED_UI_OPS. Set by start(), cleared by end().
+        self_unk: Mutex<Option<IUnknown>>,
 }
 
 impl CandidateListPresenter {
@@ -592,6 +442,7 @@ impl CandidateListPresenter {
                         is_show_mode: AtomicBool::new(true),
                         layout_sink_cookie: AtomicU32::new(TF_INVALID_COOKIE),
                         edit_cookie: AtomicU32::new(u32::MAX),
+                        self_unk: Mutex::new(None),
                 }
         }
 
@@ -629,6 +480,35 @@ impl CandidateListPresenter {
                 let ui_mgr = thread_mgr.cast::<ITfUIElementMgr>();
                 globals::log(&format!("presenter::start ui_mgr={}", ui_mgr.is_ok()));
                 *presenter.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()) = ui_mgr.ok();
+
+                // BeginUIElement/UpdateUIElement/EndUIElement synchronously
+                // broadcast to the app's ITfUIElementSink — and apps like
+                // Chromium probe the document while handling the notification,
+                // which deadlocks because we're inside an edit session holding
+                // the doc lock. Defer ALL sink-touching calls out of the
+                // session via the refresh window (same mechanism the langbar
+                // compartment sink uses for the identical hazard).
+                match this.cast::<IUnknown>() {
+                        Ok(unk) => {
+                                *presenter.self_unk.lock().unwrap_or_else(|e| e.into_inner()) = Some(unk);
+                                presenter.defer_ui_op(DEFER_BEGIN);
+                        }
+                        Err(e) => {
+                                globals::log_error(&format!("presenter::start: self_unk cast failed: {e:?}"));
+                                presenter.is_show_mode.store(true, Ordering::Relaxed);
+                        }
+                }
+                let _ = ec;
+                Ok(())
+        }
+
+        /// Deferred tail of start() — runs on the UI thread via the refresh
+        /// window, after the edit session released the document lock.
+        /// `pbShow` from BeginUIElement tells whether the APP renders the
+        /// candidate UI itself (Chromium does): then we never create ours.
+        pub fn deferred_begin(this: &ComObject<CandidateListPresenter>) {
+                let presenter = this.get();
+                let mut app_shows = false;
                 if let Some(ui_mgr) = presenter.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                         let element: ITfUIElement = this.to_interface();
                         let mut show = BOOL(0);
@@ -638,26 +518,24 @@ impl CandidateListPresenter {
                                 Err(e) => {
                                         globals::log_error(&format!("BeginUIElement failed: {e:?}"));
                                         presenter.is_show_mode.store(true, Ordering::Relaxed);
-                                        return Err(e);
+                                        return;
                                 }
                         }
                         globals::log(&format!("BeginUIElement ok: show={} id={id}", show.as_bool()));
-                        // We draw our own window regardless of the
-                        // framework's show hint — apps where the IME is
-                        // already active at startup often report
-                        // show=false on the first BeginUIElement and the
-                        // window would never appear (verified 09-28).
-                        presenter.is_show_mode.store(true, Ordering::Relaxed);
+                        app_shows = show.as_bool();
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
-                        if !show.as_bool() {
+                        if !app_shows {
                                 presenter.updated_flags.store(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
                         }
-                } else {
-                        // Could not register the element — still show our own window.
-                        presenter.is_show_mode.store(true, Ordering::Relaxed);
                 }
-
-                // Create the window (positioned under the composition range).
+                if app_shows {
+                        // The app renders the candidate list itself — honor it
+                        // and stay invisible (previously we always drew ours).
+                        presenter.is_show_mode.store(false, Ordering::Relaxed);
+                        globals::log("candidate UI: app-managed (pbShow=true)");
+                        return;
+                }
+                presenter.is_show_mode.store(true, Ordering::Relaxed);
                 match CandidateWindow::create(HWND::default(), presenter.page_size, presenter.window_state.clone()) {
                         Some(window) => {
                                 globals::log("candidate window created");
@@ -665,9 +543,7 @@ impl CandidateListPresenter {
                         }
                         None => globals::log_error("candidate window create FAILED"),
                 }
-                let _ = ec;
                 presenter.refresh_window();
-                Ok(())
         }
 
         /// Port of _EndCandidateList.
@@ -677,6 +553,9 @@ impl CandidateListPresenter {
 
         pub fn end_with_context(&self, _force: bool, _context: Option<&ITfContext>) {
                 self.edit_cookie.store(u32::MAX, Ordering::Relaxed);
+                // Take self_unk first — taking (not cloning) leaves None so a
+                // later Drop can't requeue an END for a half-destroyed object.
+                let unk = self.self_unk.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(context) = self.context.lock().unwrap_or_else(|e| e.into_inner()).take() {
                         if let Ok(source) = context.cast::<ITfSource>() {
                                 unsafe {
@@ -684,6 +563,21 @@ impl CandidateListPresenter {
                                 }
                         }
                 }
+                // Hide our window right away (pure GDI on our own hwnd) —
+                // the EndUIElement broadcast itself goes out after the edit
+                // session releases the doc lock.
+                if let Some(window) = self.window.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                        window.show(false);
+                }
+                if let Some(unk) = unk {
+                        DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, DEFER_END)));
+                        crate::tray::post_deferred_ui();
+                }
+        }
+
+        /// Deferred tail of end() — EndUIElement notifies app sinks, same
+        /// reentrancy hazard as BeginUIElement.
+        fn deferred_end(&self) {
                 let id = self.ui_element_id.swap(u32::MAX, Ordering::Relaxed);
                 if id != u32::MAX {
                         if let Some(ui_mgr) = self.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
@@ -922,7 +816,23 @@ impl CandidateListPresenter {
                 }
         }
 
+        /// Queue a UI op for post-session delivery — see DEFERRED_UI_OPS.
+        fn defer_ui_op(&self, op: u8) {
+                let unk = self.self_unk.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(unk) = unk {
+                        DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, op)));
+                        crate::tray::post_deferred_ui();
+                }
+        }
+
+        /// UpdateUIElement synchronously calls the app's UIElement sink —
+        /// never inside an edit session (same deadlock class as
+        /// BeginUIElement). All callers are key-path/session code, so defer.
         fn update_ui_element(&self) {
+                self.defer_ui_op(DEFER_UPDATE);
+        }
+
+        fn do_update_ui_element(&self) {
                 let id = self.ui_element_id.load(Ordering::Relaxed);
                 if id == u32::MAX {
                         return;
@@ -961,6 +871,41 @@ impl CandidateListPresenter {
                         .as_ref()
                         .map(|w| w.is_visible())
                         .unwrap_or(false)
+        }
+}
+
+// ---------------------------------------------------------------------
+// Deferred UI ops — BeginUIElement/UpdateUIElement/EndUIElement all
+// synchronously notify the app's ITfUIElementSink. Chromium's sink probes
+// the document while handling them, so calling them inside an edit session
+// (where we hold the doc lock) deadlocks the host window. We queue the ops
+// and the per-thread refresh window replays them once the session ends —
+// the same deferral the langbar compartment sink already uses.
+// ---------------------------------------------------------------------
+
+const DEFER_BEGIN: u8 = 0;
+const DEFER_UPDATE: u8 = 1;
+const DEFER_END: u8 = 2;
+
+thread_local! {
+        static DEFERRED_UI_OPS: std::cell::RefCell<Vec<(IUnknown, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn run_deferred_ui_ops() {
+        loop {
+                // FIFO — BEGIN must precede the UPDATE/END ops queued behind it.
+                let next = DEFERRED_UI_OPS.with(|q| {
+                        let mut q = q.borrow_mut();
+                        if q.is_empty() { None } else { Some(q.remove(0)) }
+                });
+                let Some((unk, op)) = next else { break };
+                let Ok(obj) = ComObject::<CandidateListPresenter>::cast_from(&unk) else { continue };
+                match op {
+                        DEFER_BEGIN => CandidateListPresenter::deferred_begin(&obj),
+                        DEFER_UPDATE => obj.get().do_update_ui_element(),
+                        DEFER_END => obj.get().deferred_end(),
+                        _ => {}
+                }
         }
 }
 

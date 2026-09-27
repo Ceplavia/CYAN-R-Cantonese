@@ -11,6 +11,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{w, PCWSTR};
 
+use crate::candview;
 use crate::globals;
 use crate::session::CandItem;
 use crate::settings::ImeSettings;
@@ -29,6 +30,10 @@ pub fn ui_class_name() -> &'static [u16] {
 
 pub struct CandState {
         pub items: Vec<CandItem>,
+        /// Raw input letters being composed ("neihou") — the preedit line
+        /// drawn above the candidates. IMM32 apps relying on SPECIAL_UI
+        /// never render GCS_COMPSTR, so the composition text lives here.
+        pub input_text: String,
         pub selection: usize,
         pub page_size: usize,
         pub candidate_font_size: u32,
@@ -44,6 +49,7 @@ impl Default for CandState {
         fn default() -> Self {
                 Self {
                         items: Vec::new(),
+                        input_text: String::new(),
                         selection: 0,
                         page_size: 7,
                         candidate_font_size: crate::settings::DEFAULT_CANDIDATE_FONT_SIZE,
@@ -156,21 +162,53 @@ fn ensure_window() -> Option<HWND> {
 
 // -- public API used by session.rs ------------------------------------------
 
+/// Last computed position, kept independent of the window's existence —
+/// position_window runs before ensure_window on the first keystroke, so a
+/// window-scoped pos used to be dropped and the popup opened at (0,0).
+static POSITION: Mutex<(i32, i32)> = Mutex::new((0, 0));
+
 pub fn set_position(x: i32, y: i32) {
+        *POSITION.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
         if let Ok(mut guard) = WINDOW.lock() {
                 if let Some(w) = &mut *guard {
                         w.pos = (x, y);
+                        // Re-anchor a live popup — better position sources can
+                        // resolve AFTER the first show (the post-deliver TSF
+                        // query only runs once the app has reacted to our
+                        // messages), so a visible window must actually move.
+                        let hwnd = w.hwnd();
+                        if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                                let mut rc = RECT::default();
+                                if unsafe { GetWindowRect(hwnd, &mut rc) }.is_ok() {
+                                        let (ww, wh) = (rc.right - rc.left, rc.bottom - rc.top);
+                                        if ww > 0 && wh > 0 {
+                                                let (nx, ny) = candview::clamp_to_work_area(x, y, ww, wh, y);
+                                                unsafe {
+                                                        let _ = SetWindowPos(
+                                                                hwnd,
+                                                                Some(HWND_TOPMOST),
+                                                                nx,
+                                                                ny,
+                                                                0,
+                                                                0,
+                                                                SWP_NOACTIVATE | SWP_NOSIZE,
+                                                        );
+                                                }
+                                        }
+                                }
+                        }
                 }
         }
 }
 
-pub fn show_candidates(items: &[CandItem], selection: usize, settings: &ImeSettings) {
+pub fn show_candidates(items: &[CandItem], selection: usize, settings: &ImeSettings, input_text: &str, page_size: usize) {
         let Some(hwnd) = ensure_window() else { return };
         {
                 let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
                 st.items = items.to_vec();
+                st.input_text = input_text.to_string();
                 st.selection = selection;
-                st.page_size = settings.candidate_page_size.max(1) as usize;
+                st.page_size = page_size.max(1);
                 st.candidate_font_size = settings.candidate_font_size;
                 st.number_font_size = settings.candidate_number_font_size;
                 st.comment_font_size = settings.candidate_comment_font_size;
@@ -181,12 +219,23 @@ pub fn show_candidates(items: &[CandItem], selection: usize, settings: &ImeSetti
         }
         let (w, h) = measure(hwnd);
         let (x, y) = {
-                let pos = WINDOW.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|w| w.pos).unwrap_or((0, 0));
-                clamp_to_work_area(pos.0, pos.1, w, h, pos.1 - h - 2)
+                let pos = *POSITION.lock().unwrap_or_else(|e| e.into_inner());
+                candview::clamp_to_work_area(pos.0, pos.1, w, h, pos.1)
         };
         unsafe {
-                let _ = MoveWindow(hwnd, x, y, w, h, true);
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                // HWND_TOPMOST on every show — the topmost band order can be
+                // lost when another window steals focus mid-session (e.g.
+                // the config window), which left the popup painting under
+                // the app window.
+                let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOPMOST),
+                        x,
+                        y,
+                        w,
+                        h,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
                 let _ = InvalidateRect(Some(hwnd), None, true);
         }
 }
@@ -201,110 +250,28 @@ pub fn hide_candidates() {
         }
 }
 
-// -- geometry ----------------------------------------------------------------
+// -- geometry / painting — the actual GDI work lives in the shared --------
+// candview module so this window is pixel-identical to the TSF presenter.
 
-fn row_height(st: &CandState) -> i32 {
-        st.candidate_font_size.max(st.comment_font_size).max(st.number_font_size) as i32 + 10
-}
-
-fn page_bounds(st: &CandState) -> (usize, usize) {
-        let page_size = st.page_size.max(1);
-        let page = st.selection / page_size;
-        let start = page * page_size;
-        let end = (start + page_size - 1).min(st.items.len().saturating_sub(1));
-        (start, end)
+fn style_of(st: &CandState) -> candview::Style {
+        candview::Style {
+                candidate_font_size: st.candidate_font_size,
+                number_font_size: st.number_font_size,
+                comment_font_size: st.comment_font_size,
+                text_color: st.text_color,
+                back_color: st.back_color,
+                select_color: st.select_color,
+                comment_color: st.comment_color,
+        }
 }
 
 fn measure(hwnd: HWND) -> (i32, i32) {
         let st = state().lock().unwrap_or_else(|e| e.into_inner());
-        if st.items.is_empty() {
-                return (120, row_height(&st) + 8);
-        }
-        let (start, end) = page_bounds(&st);
-        let mut max_cx = 40i32;
-        unsafe {
-                let hdc = GetDC(Some(hwnd));
-                if hdc.is_invalid() {
-                        return (200, 24);
-                }
-                let num_font = make_font(st.number_font_size);
-                let cand_font = make_font(st.candidate_font_size);
-                let cmt_font = make_font(st.comment_font_size);
-                let mut shown = 0usize;
-                for index in start..=end {
-                        let Some(item) = st.items.get(index) else { break };
-                        shown += 1;
-                        let label: Vec<u16> = format!("{}.", shown).encode_utf16().collect();
-                        let text: Vec<u16> = format!(" {}", item.text).encode_utf16().collect();
-                        let comment: Vec<u16> = format!("  {}", item.comment).encode_utf16().collect();
-                        let cx = text_width(hdc, num_font, &label)
-                                + text_width(hdc, cand_font, &text)
-                                + text_width(hdc, cmt_font, &comment);
-                        max_cx = max_cx.max(cx);
-                }
-                let _ = DeleteObject(num_font.into());
-                let _ = DeleteObject(cand_font.into());
-                let _ = DeleteObject(cmt_font.into());
-                let _ = ReleaseDC(Some(hwnd), hdc);
-        }
-        let rows = (end - start + 1) as i32;
-        (max_cx + 16, rows * row_height(&st) + 8)
-}
-
-fn clamp_to_work_area(x: i32, y: i32, w: i32, h: i32, caret_top: i32) -> (i32, i32) {
-        unsafe {
-                let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
-                let mut info = MONITORINFO {
-                        cbSize: size_of::<MONITORINFO>() as u32,
-                        ..Default::default()
-                };
-                if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-                        return (x, y);
-                }
-                let work = info.rcWork;
-                let nx = x.clamp(work.left, (work.right - w).max(work.left));
-                let mut ny = if y + h > work.bottom { caret_top.max(work.top) } else { y };
-                if ny + h > work.bottom {
-                        ny = (work.bottom - h).max(work.top);
-                }
-                (nx, ny)
-        }
-}
-
-// -- painting ----------------------------------------------------------------
-
-fn make_font(size: u32) -> HFONT {
-        unsafe {
-                CreateFontW(
-                        -(size as i32),
-                        0,
-                        0,
-                        0,
-                        FW_NORMAL.0 as i32,
-                        0,
-                        0,
-                        0,
-                        DEFAULT_CHARSET,
-                        OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS,
-                        CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
-                        w!("Microsoft JhengHei"),
-                )
-        }
-}
-
-unsafe fn text_width(hdc: HDC, font: HFONT, text: &[u16]) -> i32 {
-        unsafe {
-                if text.is_empty() {
-                        return 0;
-                }
-                let old = SelectObject(hdc, font.into());
-                let mut size = SIZE::default();
-                let _ = GetTextExtentPoint32W(hdc, text, &mut size);
-                SelectObject(hdc, old);
-                size.cx
-        }
+        let style = style_of(&st);
+        (
+                candview::measure_width(hwnd, &st.items, st.selection, st.page_size, &style, &st.input_text),
+                candview::measure_height(st.items.len(), st.selection, st.page_size, &style, &st.input_text),
+        )
 }
 
 unsafe extern "system" fn cand_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -331,68 +298,13 @@ unsafe extern "system" fn cand_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
 }
 
 fn paint(hwnd: HWND, hdc: HDC) {
-        unsafe {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Mutex<CandState>;
-                if ptr.is_null() {
-                        return;
-                }
-                let st = (*ptr).lock().unwrap_or_else(|e| e.into_inner());
-                let mut client = RECT::default();
-                let _ = GetClientRect(hwnd, &mut client);
-                let brush = CreateSolidBrush(COLORREF(st.back_color));
-                FillRect(hdc, &client, brush);
-                let _ = DeleteObject(brush.into());
-                if st.items.is_empty() {
-                        return;
-                }
-                let rh = row_height(&st);
-                let (start, end) = page_bounds(&st);
-                let num_font = make_font(st.number_font_size);
-                let cand_font = make_font(st.candidate_font_size);
-                let cmt_font = make_font(st.comment_font_size);
-                let mut orig_font = HGDIOBJ::default();
-                let mut shown = 0usize;
-                for (i, index) in (start..=end).enumerate() {
-                        let Some(item) = st.items.get(index) else { break };
-                        let y = 4 + i as i32 * rh;
-                        let mut rc = RECT { left: 0, top: y, right: 4096, bottom: y + rh };
-                        shown += 1;
-                        if index == st.selection {
-                                let sel = CreateSolidBrush(COLORREF(st.select_color));
-                                FillRect(hdc, &rc, sel);
-                                let _ = DeleteObject(sel.into());
-                        }
-                        SetBkMode(hdc, TRANSPARENT);
-                        let mut x = 8;
-                        let mut label: Vec<u16> = format!("{}.", shown).encode_utf16().collect();
-                        SetTextColor(hdc, COLORREF(st.text_color));
-                        let old = SelectObject(hdc, num_font.into());
-                        if orig_font.is_invalid() {
-                                orig_font = old;
-                        }
-                        rc.left = x;
-                        DrawTextW(hdc, &mut label, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                        x += text_width(hdc, num_font, &label);
-                        let mut wide: Vec<u16> = format!(" {}", item.text).encode_utf16().collect();
-                        SelectObject(hdc, cand_font.into());
-                        rc.left = x;
-                        DrawTextW(hdc, &mut wide, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                        x += text_width(hdc, cand_font, &wide);
-                        if !item.comment.is_empty() {
-                                let mut comment: Vec<u16> = format!("  {}", item.comment).encode_utf16().collect();
-                                SelectObject(hdc, cmt_font.into());
-                                rc.left = x;
-                                SetTextColor(hdc, COLORREF(st.comment_color));
-                                DrawTextW(hdc, &mut comment, &mut rc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
-                        }
-                }
-                if !orig_font.is_invalid() {
-                        SelectObject(hdc, orig_font);
-                }
-                let _ = DeleteObject(num_font.into());
-                let _ = DeleteObject(cand_font.into());
-                let _ = DeleteObject(cmt_font.into());
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Mutex<CandState> };
+        if ptr.is_null() {
+                return;
         }
+        let st = unsafe { &*ptr }.lock().unwrap_or_else(|e| e.into_inner());
+        let style = style_of(&st);
+        candview::paint(hwnd, hdc, &st.items, st.selection, st.page_size, &style, &st.input_text);
 }
 
 // -- IME UI window -----------------------------------------------------------

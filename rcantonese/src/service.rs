@@ -462,7 +462,14 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                 globals::guarded("OnTestKeyDown", || {
                         let Some(mut state) = self.try_lock() else { return Ok(BOOL(0)) };
                         let Some(context) = pic.as_ref() else { return Ok(BOOL(0)) };
-                        match crate::keys::test_key(&mut state, context, wparam.0, lparam.0, true) {
+                        let r = crate::keys::test_key(&mut state, context, wparam.0, lparam.0, true);
+                        globals::log(&format!(
+                                "tip: test_keydown vk={:#04x} pid={} -> {}",
+                                wparam.0,
+                                std::process::id(),
+                                if r.is_some() { "eat" } else { "pass" }
+                        ));
+                        match r {
                                 Some(_) => Ok(BOOL(1)),
                                 None => Ok(BOOL(0)),
                         }

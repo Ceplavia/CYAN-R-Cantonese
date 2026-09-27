@@ -142,9 +142,44 @@ pub fn write_candlist(himc: HIMC, items: &[String], selection: u32, page_size: u
         true
 }
 
-/// Append a TRANSMSG to the context's message buffer and ask imm32 to
-/// deliver it (ImmGenerateMessage posts the queued messages to hWnd).
+// ---------------------------------------------------------------------------
+// Delivery reentrancy control.
+//
+// ImmGenerateMessage SendMessages WM_IME_* into the app; the app's handler
+// (or imm32 itself, e.g. NI_CONTEXTUPDATED echoes) can synchronously call
+// NotifyIME again. Two hazards without a guard:
+//   1. Infinite recursion — a nested deliver re-triggers the same notify path
+//      (Telegram/Qt did this to the point of stack overflow, 0xC000041D).
+//   2. Mid-iteration realloc — push_message resizes hMsgBuf while imm32 is
+//      walking it, leaving imm32 with a dangling IMCC pointer.
+// While DELIVERING is set, push_message stages into PENDING and the outer
+// deliver loop flushes it once the in-flight ImmGenerateMessage returns.
+// ---------------------------------------------------------------------------
+thread_local! {
+        static DELIVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static PENDING: std::cell::RefCell<Vec<(usize, u32, usize, isize)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Append a TRANSMSG to the context's message buffer. Deliberately does NOT
+/// call ImmGenerateMessage here: delivery runs SendMessage into the app's
+/// wndproc, and apps like Chromium re-enter our exports (NotifyIME etc.)
+/// while handling WM_IME_* — which deadlocks the non-reentrant session
+/// mutex. Callers must invoke deliver() after releasing it.
 pub fn push_message(himc: HIMC, message: u32, wparam: usize, lparam: isize) {
+        // try_with — these thread-locals can be touched during thread
+        // teardown (a late deliver racing DLL_THREAD_DETACH); .with would
+        // panic there, which inside a host process is fatal.
+        if DELIVERING.try_with(|d| d.get()).unwrap_or(false) {
+                let _ = PENDING.try_with(|p| {
+                        p.borrow_mut().push((himc.0 as usize, message, wparam, lparam));
+                });
+                return;
+        }
+        push_message_now(himc, message, wparam, lparam);
+}
+
+fn push_message_now(himc: HIMC, message: u32, wparam: usize, lparam: isize) {
         let Some(imc) = lock_imc(himc) else { return };
         let count = imc.dwNumMsgBuf;
         let size = (count + 1) as usize * size_of::<TRANSMSG>();
@@ -171,7 +206,70 @@ pub fn push_message(himc: HIMC, message: u32, wparam: usize, lparam: isize) {
                 slot.wParam = WPARAM(wparam);
                 slot.lParam = LPARAM(lparam);
                 let _ = ImmUnlockIMCC(himcc);
-                let _ = ImmGenerateMessage(himc);
+        }
+}
+
+fn queued_count(himc: HIMC) -> u32 {
+        let Some(imc) = lock_imc(himc) else { return 0 };
+        let n = imc.dwNumMsgBuf;
+        unlock_imc(himc);
+        n
+}
+
+/// Flush queued TRANSMSGs to the app's window. Must be called AFTER the
+/// session mutex is released — SendMessage can re-enter our exports.
+/// Nested deliveries are no-ops: the outer loop keeps ImmGenerateMessage-ing
+/// until both hMsgBuf and the staged PENDING list drain (bounded).
+pub fn deliver(himc: HIMC) {
+        // TLS already destroyed → nothing sane to do but bail.
+        if DELIVERING.try_with(|d| d.replace(true)).unwrap_or(true) {
+                return;
+        }
+        let t0 = std::time::Instant::now();
+        let mut rounds = 0u32;
+        for _ in 0..64 {
+                // Move anything staged during the previous delivery into the
+                // IMC buffer — never resize hMsgBuf while imm32 is walking it.
+                let staged: Vec<(usize, u32, usize, isize)> =
+                        PENDING.try_with(|p| std::mem::take(&mut *p.borrow_mut()))
+                                .unwrap_or_default();
+                for (h, m, w, l) in staged {
+                        push_message_now(HIMC(h as *mut _), m, w, l);
+                }
+                if queued_count(himc) == 0 {
+                        break;
+                }
+                rounds += 1;
+                unsafe {
+                        let _ = ImmGenerateMessage(himc);
+                }
+        }
+        let dt = t0.elapsed();
+        if dt.as_millis() > 20 {
+                crate::globals::log(&format!(
+                        "ime: deliver took {dt:?} rounds={rounds} pid={}",
+                        std::process::id()
+                ));
+        }
+        let _ = DELIVERING.try_with(|d| d.set(false));
+}
+
+/// Open/close the context AND mirror the state into fdwConversion —
+/// Chromium/Electron checks `fdwConversion & IME_CMODE_NATIVE` to decide
+/// whether the IME is in CJK input mode; with it stuck at 0 (ALPHANUMERIC)
+/// every keystroke is eaten but composition results are silently dropped.
+pub fn set_open_state(himc: HIMC, open: bool) {
+        unsafe {
+                let _ = ImmSetOpenStatus(himc, open);
+        }
+        if let Some(imc) = lock_imc(himc) {
+                imc.fdwConversion = if open {
+                        (IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE | IME_CMODE_SYMBOL).0
+                } else {
+                        0
+                };
+                imc.fdwSentence = 0;
+                unlock_imc(himc);
         }
 }
 

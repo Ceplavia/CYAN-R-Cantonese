@@ -40,9 +40,12 @@ mod pinyin;
 mod shapes;
 #[path = "../../rcantonese/src/keytable.rs"]
 mod keytable;
+#[path = "../../rcantonese/src/candview.rs"]
+mod candview;
 
 mod ctx;
 mod session;
+mod tsfbridge;
 mod ui;
 mod ime;
 
@@ -103,4 +106,12 @@ pub fn test_open_status(himc: windows::Win32::UI::Input::Ime::HIMC) -> bool {
 #[doc(hidden)]
 pub fn test_process_key(himc: windows::Win32::UI::Input::Ime::HIMC, vk: u32, keystate: &[u8; 256]) -> bool {
         session::process_key(himc, vk, 0, keystate)
+}
+
+/// Block until the engine/memory warm-up finishes — the runtime path is
+/// deliberately non-blocking (host UI threads must not stall on sqlite
+/// open), so tests join the warm explicitly before typing.
+#[doc(hidden)]
+pub fn test_warm_engine() {
+        session::warm_engine();
 }

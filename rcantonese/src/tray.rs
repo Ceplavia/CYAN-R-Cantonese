@@ -38,6 +38,7 @@ const WM_TRAY_SHOW: u32 = WM_APP + 50; // wParam = pid — IME active+foreground
 const WM_TRAY_HIDE: u32 = WM_APP + 51; // wParam = pid — IME no longer current
 const WM_LANGBAR_REFRESH: u32 = WM_APP + 52; // host windows: deferred langbar icon refresh
 const WM_SHOW_SETTINGS_MENU: u32 = WM_APP + 53; // host windows: deferred right-click menu
+const WM_DEFERRED_UI: u32 = WM_APP + 54; // host windows: deferred candidate UI-element ops
 const TRAY_MAGIC: isize = 0x5243; // 'RC'
 
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
@@ -186,6 +187,25 @@ pub fn post_settings_menu(item_ptr: usize, x: i32, y: i32) {
         }
 }
 
+/// Deferred candidate-UI ops (BeginUIElement/UpdateUIElement/EndUIElement).
+/// Those calls synchronously notify the app's ITfUIElementSink, and apps
+/// like Chromium probe the document inside the sink — which deadlocks if we
+/// call them while holding the edit-session doc lock. Replayed by the same
+/// per-thread message window the langbar deferral uses.
+pub fn post_deferred_ui() {
+        let target = REFRESH_HWND.with(|h| {
+                if h.get() == 0 {
+                        h.set(raw(create_refresh_window()));
+                }
+                h.get()
+        });
+        if target != 0 {
+                unsafe {
+                        let _ = PostMessageW(Some(hwnd(target)), WM_DEFERRED_UI, WPARAM(0), LPARAM(0));
+                }
+        }
+}
+
 thread_local! {
         static REFRESH_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
@@ -232,6 +252,12 @@ unsafe extern "system" fn refresh_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM,
                                 let x = (lparam.0 as u16) as i16 as i32;
                                 let y = ((lparam.0 >> 16) as u16) as i16 as i32;
                                 crate::langbar::deferred_settings_menu(wparam.0, x, y);
+                                LRESULT(0)
+                        });
+                }
+                if msg == WM_DEFERRED_UI {
+                        return globals::guarded_value("deferred ui ops", LRESULT(0), || {
+                                crate::candidate::run_deferred_ui_ops();
                                 LRESULT(0)
                         });
                 }
