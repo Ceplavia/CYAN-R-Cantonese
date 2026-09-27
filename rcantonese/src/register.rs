@@ -275,6 +275,18 @@ fn set_base_layout_substitute(klid: &str) {
 /// created before the .ime existed pin a plain keyboard (e.g. 0x04090C04)
 /// so the IME never loads in IMM32 apps. Only touches assemblies whose
 /// Default is our CLSID.
+/// Runtime self-heal for the CTF assembly binding. Windows seeds
+/// `Assemblies\<langid>\<asm>` lazily on first legacy activation, so the
+/// install-time pass often runs before the key exists and Windows fills
+/// it with whatever the language's default keyboard was (e.g. the US
+/// layout under zh-HK -> hkl 04090C04) — IMM32 apps then never reach
+/// our .ime. Runs on every TIP activation: a couple of HKCU reads per
+/// call, writes only when the cached layout isn't ours.
+pub fn heal_imm32_assembly_binding() {
+        let Some(hkl) = find_ime_hkl() else { return };
+        fix_assembly_keyboard_layout(hkl);
+}
+
 fn fix_assembly_keyboard_layout(ime_hkl: HKL) {
         let root_path = wide_string("SOFTWARE\\Microsoft\\CTF\\Assemblies");
         let our_clsid = format!("{:?}", CLSID_RCANTONESE).to_uppercase();
@@ -317,19 +329,40 @@ fn fix_assembly_keyboard_layout(ime_hkl: HKL) {
                                 ) == ERROR_SUCCESS;
                                 if ok {
                                         let cur = String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]);
-                                        if cur.trim_matches(char::from(0)).eq_ignore_ascii_case(&our_clsid) {
-                                                let _ = RegSetValueExW(
-                                                        key,
-                                                        w!("KeyboardLayout"),
-                                                        Some(0),
-                                                        REG_DWORD,
-                                                        Some(&(ime_hkl.0 as usize as u32).to_le_bytes()),
-                                                );
-                                                globals::log(&format!(
-                                                        "IME01: assembly {lang_name} KeyboardLayout -> {:08X}",
-                                                        ime_hkl.0 as usize as u32
-                                                ));
+                                        if !cur.trim_matches(char::from(0)).eq_ignore_ascii_case(&our_clsid) {
+                                                let _ = RegCloseKey(key);
+                                                continue;
                                         }
+                                        let mut kbd = 0u32;
+                                        let mut ksize = 4u32;
+                                        let current = if RegQueryValueExW(
+                                                key,
+                                                w!("KeyboardLayout"),
+                                                None,
+                                                None,
+                                                Some(&mut kbd as *mut u32 as *mut u8),
+                                                Some(&mut ksize),
+                                        ) == ERROR_SUCCESS
+                                        {
+                                                Some(kbd)
+                                        } else {
+                                                None
+                                        };
+                                        if current == Some(ime_hkl.0 as usize as u32) {
+                                                let _ = RegCloseKey(key);
+                                                continue;
+                                        }
+                                        let _ = RegSetValueExW(
+                                                key,
+                                                w!("KeyboardLayout"),
+                                                Some(0),
+                                                REG_DWORD,
+                                                Some(&(ime_hkl.0 as usize as u32).to_le_bytes()),
+                                        );
+                                        globals::log_error(&format!(
+                                                "IME01: assembly {lang_name} KeyboardLayout {:?} -> {:08X}",
+                                                current, ime_hkl.0 as usize as u32
+                                        ));
                                 }
                                 let _ = RegCloseKey(key);
                         }
