@@ -94,19 +94,10 @@ fn find_ime_hkl() -> Option<HKL> {
 fn install_imm32_ime() -> Option<HKL> {
         let hkl = install_imm32_ime_inner();
         if let Some(hkl) = hkl {
-                // Fixups are cheap and idempotent — run them even when the
-                // KLID already exists, because older installs may have
-                // baked a plain-keyboard substitute into the CTF
-                // assembly binding and user substitutes.
-                let klid = format!("{:08X}", hkl.0 as usize as u32);
-                // Legacy Substitutes map: activating the base zh-HK
-                // keyboard yields our IME instead — the classic way
-                // IMM32 apps (WoW/EVE) load .ime files.
-                set_base_layout_substitute(&klid);
                 // The per-user CTF assembly binding caches the keyboard
                 // layout handed to legacy apps — if it was written before
                 // the E-KLID existed it points at a plain keyboard and the
-                // .ime never loads.
+                // .ime never loads. Cheap + idempotent, run every time.
                 fix_assembly_keyboard_layout(hkl);
         }
         hkl

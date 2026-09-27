@@ -749,8 +749,14 @@ pub fn on_select(himc: HIMC, selected: bool) {
                 ctx::init_compstr(himc);
                 with_session(himc, |s| {
                         s.settings = config::load();
-                        // Warm the engine so the first keystroke isn't slow.
+                });
+                // Engine warms lazily on first real key — doing sqlite +
+                // segmenter init inside ImeSelect stalls the host UI
+                // thread (and, when the IME is the session default, every
+                // process pays it at once).
+                std::thread::spawn(|| {
                         let _ = engine();
+                        let _ = memory();
                 });
         } else {
                 with_session(himc, |s| s.cancel());

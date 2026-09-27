@@ -21,6 +21,10 @@ if not exist "%ROOT%\target\i686-pc-windows-msvc\debug\ime.sqlite3" (
         mklink /h "%ROOT%\target\i686-pc-windows-msvc\debug\ime.sqlite3" "%ROOT%\rcantonese\ime.sqlite3" 2>nul || copy /y "%ROOT%\rcantonese\ime.sqlite3" "%ROOT%\target\i686-pc-windows-msvc\debug\ime.sqlite3"
 )
 
+rem .ime may be loaded by processes — rename the old image aside first
+rem (loaded DLLs can be renamed, not overwritten).
+move /y "%windir%\System32\r-cantonese.ime" "%windir%\System32\r-cantonese-old-%RANDOM%.ime" >nul 2>&1
+move /y "%windir%\SysWOW64\r-cantonese.ime" "%windir%\SysWOW64\r-cantonese-old-%RANDOM%.ime" >nul 2>&1
 copy /y "%ROOT%\target\debug\r_cantonese_ime.dll" "%windir%\System32\r-cantonese.ime"
 copy /y "%ROOT%\target\i686-pc-windows-msvc\debug\r_cantonese_ime.dll" "%windir%\SysWOW64\r-cantonese.ime"
 
