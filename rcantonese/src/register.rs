@@ -156,19 +156,99 @@ fn install_imm32_ime() -> Option<HKL> {
                         set(&wide_string("Layout File"), &wide_string("kbdus.dll"));
                         set(&wide_string("Layout Text"), &wide_string(IME_LAYOUT_TEXT));
                         let _ = RegCloseKey(created);
+                        // Weasel's manual path also adds the HKL to the
+                        // user's Preload list — without it the layout
+                        // can't be activated by CTF substitution or
+                        // LoadKeyboardLayout at all.
+                        add_ime_to_preload(&klid);
                         return Some(HKL(u32::from_str_radix(&klid, 16).unwrap_or(0) as *mut _));
                 }
                 None
         }
 }
 
-/// Remove our E-series KLID on uninstall.
+/// Append an IME KLID to HKCU\Keyboard Layout\Preload — weasel's
+/// registration does this whenever the KLID was written manually; the
+/// preload entry makes the layout actually loadable on threads.
+fn add_ime_to_preload(klid: &str) {
+        let path = wide_string("Keyboard Layout\\Preload");
+        let mut key = HKEY::default();
+        unsafe {
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), Some(0), KEY_READ | KEY_WRITE, &mut key)
+                        != ERROR_SUCCESS
+                {
+                        globals::log_error("IME01: Preload key open failed");
+                        return;
+                }
+                for i in 1u32..=20 {
+                        let name = wide_string(&i.to_string());
+                        let mut buf = [0u16; 16];
+                        let mut size = (buf.len() * 2) as u32;
+                        let exists = RegQueryValueExW(
+                                key,
+                                PCWSTR(name.as_ptr()),
+                                None,
+                                None,
+                                Some(buf.as_mut_ptr() as *mut u8),
+                                Some(&mut size),
+                        ) == ERROR_SUCCESS;
+                        if !exists {
+                                let value = wide_string(&klid.to_uppercase());
+                                let bytes = std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2);
+                                let ok = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_SZ, Some(bytes));
+                                globals::log_error(&format!("IME01: Preload[{i}]={klid} set={ok:?}"));
+                                break;
+                        }
+                }
+                let _ = RegCloseKey(key);
+        }
+}
+
+/// Remove our E-series KLID + its preload entry on uninstall.
 fn uninstall_imm32_ime() {
         let Some(hkl) = find_ime_hkl() else { return };
         let klid = format!("{:08X}", hkl.0 as usize as u32);
         let sub = format!("SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\{klid}");
         unsafe {
                 let _ = recurse_delete_key(HKEY_LOCAL_MACHINE, &wide_string(&sub));
+        }
+        remove_ime_from_preload(&klid);
+}
+
+/// Drop our KLID from HKCU\Keyboard Layout\Preload.
+fn remove_ime_from_preload(klid: &str) {
+        let path = wide_string("Keyboard Layout\\Preload");
+        let mut key = HKEY::default();
+        unsafe {
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), Some(0), KEY_READ | KEY_WRITE, &mut key)
+                        != ERROR_SUCCESS
+                {
+                        return;
+                }
+                for i in 1u32..=20 {
+                        let name = wide_string(&i.to_string());
+                        let mut buf = [0u16; 16];
+                        let mut size = (buf.len() * 2) as u32;
+                        if RegQueryValueExW(
+                                key,
+                                PCWSTR(name.as_ptr()),
+                                None,
+                                None,
+                                Some(buf.as_mut_ptr() as *mut u8),
+                                Some(&mut size),
+                        ) != ERROR_SUCCESS
+                        {
+                                break;
+                        }
+                        let val = String::from_utf16_lossy(&buf[..size as usize / 2])
+                                .trim_end_matches('\0')
+                                .to_string();
+                        if val.eq_ignore_ascii_case(klid) {
+                                let _ = RegDeleteValueW(key, PCWSTR(name.as_ptr()));
+                                break;
+                        }
+                }
+                let _ = RegCloseKey(key);
         }
 }
 
