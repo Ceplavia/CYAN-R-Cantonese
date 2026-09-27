@@ -116,6 +116,11 @@ impl Processor {
         /// Port of CCompositionProcessorEngine::SetupLanguageProfile.
         pub fn new(thread_mgr: &ITfThreadMgr, client_id: u32) -> Option<Self> {
                 let mut settings = load_settings();
+                crate::globals::log(&format!(
+                        "Processor::new variant={:?} pid={}",
+                        settings.character_variant,
+                        std::process::id()
+                ));
                 let mut processor = Self {
                         keys: KeystrokeEngine::new(),
                         engine: None,
