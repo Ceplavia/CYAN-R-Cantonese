@@ -47,6 +47,7 @@ extern "system" fn DllMain(hinstance: HINSTANCE, reason: u32, _reserved: *const 
 /// Port of DllMain.cpp DllGetClassObject.
 #[unsafe(no_mangle)]
 extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID, ppv: *mut *mut core::ffi::c_void) -> HRESULT {
+        globals::log_error("DllGetClassObject enter");
         globals::guarded_value("DllGetClassObject", HRESULT(0x80004005u32 as i32), || {
                 if ppv.is_null() || rclsid.is_null() || riid.is_null() {
                         return HRESULT(0x80070057u32 as i32); // E_INVALIDARG

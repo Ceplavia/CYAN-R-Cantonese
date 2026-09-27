@@ -99,6 +99,12 @@ fn install_imm32_ime() -> Option<HKL> {
                 // the E-KLID existed it points at a plain keyboard and the
                 // .ime never loads. Cheap + idempotent, run every time.
                 fix_assembly_keyboard_layout(hkl);
+                // Same for the Substitutes map — the zh-HK language-install
+                // (ILOT "0C04:00000409") writes 00000c04->00000409, and an
+                // earlier version only set ours in the ImmInstallIMEW-
+                // failure fallback, so a successful install leaves the
+                // binding pointed at the US keyboard.
+                fix_base_layout_substitute(hkl);
         }
         hkl
 }
@@ -285,6 +291,48 @@ fn set_base_layout_substitute(klid: &str) {
 pub fn heal_imm32_assembly_binding() {
         let Some(hkl) = find_ime_hkl() else { return };
         fix_assembly_keyboard_layout(hkl);
+        fix_base_layout_substitute(hkl);
+}
+
+/// Check `HKCU\Keyboard Layout\Substitutes\<base-langid>` and point it at
+/// our E-KLID when it isn't. Anything that (re)installs the zh-HK
+/// language (ILOT "0C04:00000409") rewrites the entry to the US layout —
+/// legacy apps then get hkl 04090C04 instead of our .ime and the TIP
+/// switch silently reverts.
+fn fix_base_layout_substitute(ime_hkl: HKL) {
+        let klid = format!("{:08X}", ime_hkl.0 as usize as u32);
+        let base = format!("{:08x}", TEXTSERVICE_LANGID);
+        let path = wide_string("Keyboard Layout\\Substitutes");
+        let mut key = HKEY::default();
+        unsafe {
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), Some(0), KEY_READ | KEY_WRITE, &mut key)
+                        != ERROR_SUCCESS
+                {
+                        set_base_layout_substitute(&klid);
+                        return;
+                }
+                let name = wide_string(&base);
+                let mut buf = [0u16; 16];
+                let mut size = (buf.len() * 2) as u32;
+                let mut ty = REG_VALUE_TYPE::default();
+                let cur = RegQueryValueExW(
+                        key,
+                        PCWSTR(name.as_ptr()),
+                        None,
+                        Some(&mut ty),
+                        Some(buf.as_mut_ptr() as *mut u8),
+                        Some(&mut size),
+                );
+                let _ = RegCloseKey(key);
+                if cur == ERROR_SUCCESS {
+                        let n = (size as usize / 2).saturating_sub(1).min(buf.len());
+                        let s = String::from_utf16_lossy(&buf[..n]);
+                        if s.eq_ignore_ascii_case(&klid) {
+                                return; // already pointing at our IME
+                        }
+                }
+        }
+        set_base_layout_substitute(&klid);
 }
 
 fn fix_assembly_keyboard_layout(ime_hkl: HKL) {
