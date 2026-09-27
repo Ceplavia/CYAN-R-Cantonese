@@ -568,3 +568,44 @@ impl PunctuationKey {
                 })
         }
 }
+
+/// What a punctuation-key press resolves to — shared decision for the TSF
+/// (_HandlePunctuationKey) and IMM32 (process_punctuation) frontends so the
+/// two paths can never diverge.
+pub enum PunctAction {
+        /// Not a punctuation key we handle — the caller passes it through.
+        Pass,
+        /// Commit this text immediately (instant symbol, ASCII text when
+        /// Cantonese punctuation is off, or the digit-period rule).
+        Commit(&'static str),
+        /// Open the key's symbol candidate list.
+        OpenList(&'static PunctuationKey),
+}
+
+/// Decide what a punctuation-key press does.
+///
+/// `prev_is_digit` powers the number-input optimization: an unshifted "."
+/// right after an ASCII digit stays "." (3.14, 1.0.0, IP addresses) instead
+/// of becoming "。". Each frontend resolves it from its own context — the
+/// TSF path reads the document char before the caret, the .ime tracks the
+/// last committed/passed-through key.
+pub fn decide(vk: u32, is_shifting: bool, cantonese_punct: bool, prev_is_digit: bool) -> PunctAction {
+        if !is_shifting && prev_is_digit && vk == VK_OEM_PERIOD.0 as u32 {
+                return PunctAction::Commit(".");
+        }
+        let Some(key) = PunctuationKey::for_virtual_key(vk) else {
+                return PunctAction::Pass;
+        };
+        if !key.should_handle(is_shifting) {
+                return PunctAction::Pass;
+        }
+        let instant = if cantonese_punct {
+                key.instant_symbol(is_shifting)
+        } else {
+                Some(key.text(is_shifting))
+        };
+        match instant {
+                Some(text) => PunctAction::Commit(text),
+                None => PunctAction::OpenList(key),
+        }
+}

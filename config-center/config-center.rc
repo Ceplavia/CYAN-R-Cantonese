@@ -1,0 +1,5 @@
+LANGUAGE 0x09, 0x01
+
+// App icon — same jyutping.ico as the IME windows. ID 1 makes it the exe's
+// default icon (Explorer/taskbar); the window icon is set via WM_SETICON.
+1 ICON "..\\rcantonese\\resources\\jyutping.ico"

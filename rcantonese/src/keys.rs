@@ -750,27 +750,62 @@ fn handle_composition_arrow_key(state: &mut ServiceState, ec: u32, context: &ITf
 // ---------------------------------------------------------------------
 
 fn handle_punctuation_key(state: &mut ServiceState, ec: u32, context: &ITfContext, code: u32, is_shifting: bool) -> Result<()> {
-        let Some(key) = crate::punctuation::PunctuationKey::for_virtual_key(code) else {
-                return Err(Error::from_hresult(E_INVALIDARG));
-        };
-        if !key.should_handle(is_shifting) {
-                return Err(Error::from_hresult(E_INVALIDARG));
-        }
-        finalize_before_punctuation(state, ec, context)?;
-
         let is_cantonese = thread_compartment(state, globals::GUID_COMPARTMENT_PUNCTUATION_FORM)
                 .get_bool()
                 .unwrap_or(true);
-        let output = if is_cantonese {
-                key.instant_symbol(is_shifting)
-        } else {
-                Some(key.text(is_shifting))
-        };
-        if let Some(output) = output {
-                let wide: Vec<u16> = output.encode_utf16().collect();
-                return composition::add_char_and_finalize(ec, context, &wide);
+        // Shared with the IMM32 path (punctuation::decide) — instant symbols
+        // commit directly, and "." after an ASCII digit stays half-width.
+        let action = crate::punctuation::decide(code, is_shifting, is_cantonese, prev_char_is_ascii_digit(ec, context));
+        match action {
+                crate::punctuation::PunctAction::Pass => return Err(Error::from_hresult(E_INVALIDARG)),
+                _ => {}
         }
-        start_punctuation_candidate_list(state, ec, context, key, is_shifting)
+        finalize_before_punctuation(state, ec, context)?;
+        match action {
+                crate::punctuation::PunctAction::Commit(output) => {
+                        let wide: Vec<u16> = output.encode_utf16().collect();
+                        composition::add_char_and_finalize(ec, context, &wide)
+                }
+                crate::punctuation::PunctAction::OpenList(key) => {
+                        start_punctuation_candidate_list(state, ec, context, key, is_shifting)
+                }
+                crate::punctuation::PunctAction::Pass => Err(Error::from_hresult(E_INVALIDARG)),
+        }
+}
+
+/// Is the document character right before the caret an ASCII digit? Powers
+/// the number-context "." rule. Stateless — reads the text store, so it
+/// stays correct after mouse clicks and external edits.
+fn prev_char_is_ascii_digit(ec: u32, context: &ITfContext) -> bool {
+        unsafe {
+                let mut selection = [TF_SELECTION::default()];
+                let mut fetched = 0u32;
+                if context
+                        .GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched)
+                        .is_err()
+                        || fetched == 0
+                {
+                        return false;
+                }
+                let Some(sel_range) = std::mem::ManuallyDrop::take(&mut selection[0].range) else {
+                        return false;
+                };
+                let Ok(prev) = sel_range.Clone() else { return false };
+                let mut moved = 0i32;
+                if prev
+                        .ShiftStart(ec, -1, &mut moved, std::ptr::null())
+                        .is_err()
+                        || moved == 0
+                {
+                        return false;
+                }
+                let mut buf = [0u16; 1];
+                let mut got = 0u32;
+                if prev.GetText(ec, 0, &mut buf, &mut got).is_err() || got == 0 {
+                        return false;
+                }
+                (u16::from(b'0')..=u16::from(b'9')).contains(&buf[0])
+        }
 }
 
 fn finalize_before_punctuation(state: &mut ServiceState, ec: u32, context: &ITfContext) -> Result<()> {

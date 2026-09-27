@@ -104,6 +104,10 @@ pub struct Session {
         /// re-querying on every keystroke made the window flash-jump
         /// (coarse fallback first, real caret after the app reacted).
         needs_anchor: bool,
+        /// The character before the caret is an ASCII digit — powers the
+        /// shared number-input rule ("3." stays "."). Tracked from our own
+        /// commits and from pass-through keys (see note_passed_key).
+        prev_digit: bool,
         settings: ImeSettings,
 }
 
@@ -187,6 +191,7 @@ impl Session {
                         pending_open: None,
                         app_managed_ui: false,
                         needs_anchor: false,
+                        prev_digit: false,
                         settings: config::load(),
                 }
         }
@@ -232,6 +237,7 @@ impl Session {
         /// Commit `text` into the target app and clear the session.
         fn commit(&mut self, text: &str) {
                 let t0 = std::time::Instant::now();
+                self.prev_digit = text.chars().last().is_some_and(|c| c.is_ascii_digit());
                 let wide: Vec<u16> = text.encode_utf16().collect();
                 let had_comp = self.composing;
                 ctx::write_comp(self.imc(), &[], &wide);
@@ -692,7 +698,32 @@ impl Session {
                 }
         }
 
+        /// A key we declined gets typed/handled by the app itself — keep
+        /// `prev_digit` in sync: digits set it, keys that produce other text
+        /// or move the caret clear it, pure modifiers leave it alone.
+        fn note_passed_key(&mut self, vk: u32, shift: bool, ctrl: bool, alt: bool) {
+                const MODIFIER_VKS: &[u32] = &[
+                        VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, 0xA2, 0xA3, // L/RCONTROL
+                        VK_MENU, 0xA4, 0xA5,                                    // L/RMENU
+                        0x5B, 0x5C,                                             // L/RWIN
+                        VK_CAPITAL.0 as u32, 0x90, 0x91,                        // caps/num/scroll lock
+                ];
+                if (0x30..=0x39).contains(&vk) || (0x60..=0x69).contains(&vk) {
+                        self.prev_digit = !shift && !ctrl && !alt;
+                } else if !MODIFIER_VKS.contains(&vk) {
+                        self.prev_digit = false;
+                }
+        }
+
         fn process_digit(&mut self, digit: usize, shift: bool) -> bool {
+                if shift {
+                        // Shift+digit is a punctuation key, not a candidate
+                        // selection — same precedence as the TSF path
+                        // (should_handle_punctuation beats SelectByNumber).
+                        // Map numpad vks onto the top-row digit so the same
+                        // punctuation table applies.
+                        return self.process_punctuation(0x30 + digit as u32, true);
+                }
                 if self.composing && !self.items.is_empty() {
                         // Page-relative select — upstream's
                         // _SetSelectionInPage: the digit addresses the row
@@ -705,15 +736,6 @@ impl Session {
                                 if index < self.items.len() {
                                         self.selection = index;
                                         self.commit_selection();
-                                }
-                        }
-                        return true;
-                }
-                if shift {
-                        // Shift+digit — symbol candidates (e.g. ⇧2 → @/＠).
-                        if let Some(pk) = punctuation::PunctuationKey::for_virtual_key(0x30 + digit as u32) {
-                                if pk.should_handle(true) {
-                                        return self.open_punct_list(pk, true);
                                 }
                         }
                         return true;
@@ -732,10 +754,11 @@ impl Session {
         }
 
         fn process_punctuation(&mut self, vk: u32, shift: bool) -> bool {
-                let Some(key) = punctuation::PunctuationKey::for_virtual_key(vk) else {
-                        return false;
-                };
-                if !key.should_handle(shift) {
+                // Shared decision (instant vs list vs digit-period) lives in
+                // punctuation::decide — identical rule as the TSF path.
+                let cantonese = self.settings.punctuation_form == PunctuationForm::Cantonese;
+                let action = punctuation::decide(vk, shift, cantonese, self.prev_digit);
+                if matches!(action, punctuation::PunctAction::Pass) {
                         return false;
                 }
                 // In-progress composition — commit the selected/raw text
@@ -747,18 +770,13 @@ impl Session {
                                 self.commit_selection();
                         }
                 }
-                let cantonese = self.settings.punctuation_form == PunctuationForm::Cantonese;
-                let output = if cantonese {
-                        key.instant_symbol(shift)
-                } else {
-                        Some(key.text(shift))
-                };
-                match output {
-                        Some(text) => {
+                match action {
+                        punctuation::PunctAction::Commit(text) => {
                                 self.commit(text);
                                 true
                         }
-                        None => self.open_punct_list(key, shift),
+                        punctuation::PunctAction::OpenList(key) => self.open_punct_list(key, shift),
+                        punctuation::PunctAction::Pass => false,
                 }
         }
 
@@ -1352,6 +1370,17 @@ pub fn process_key(himc: HIMC, vk: u32, lparam: isize, keystate: &[u8; 256]) -> 
         // WM_IME_STARTCOMPOSITION we just delivered — resolve the anchor
         // once, now that the app has reacted.
         resolve_anchor(himc);
+        if !accepted && (lparam & (1 << 31)) == 0 {
+                // The app itself will handle this keydown — track digits for
+                // the number-context "." rule and drop the flag on keys that
+                // produce other text or move the caret.
+                let (shift, ctrl, alt) = (
+                        keystate[VK_SHIFT as usize] & 0x80 != 0,
+                        keystate[VK_CONTROL as usize] & 0x80 != 0,
+                        keystate[VK_MENU as usize] & 0x80 != 0,
+                );
+                with_session(himc, |s| s.note_passed_key(vk, shift, ctrl, alt));
+        }
         if accepted {
                 globals::log(&format!("ime: consumed vk={vk:#x} pid={}", std::process::id()));
         }

@@ -72,7 +72,7 @@ fn broadcast_reload() {
 }
 
 /// Strip WS_MAXIMIZEBOX|WS_THICKFRAME off this process's windows — the config
-/// center is a fixed-size dialog.
+/// center is a fixed-size dialog — and set the embedded jyutping.ico icon.
 fn disable_window_maximize() {
         use windows::Win32::System::Threading::GetCurrentProcessId;
         unsafe extern "system" fn fix(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -93,6 +93,13 @@ fn disable_window_maximize() {
                                                 0,
                                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
                                         );
+                                }
+                                // Icon resource 1 — jyutping.ico embedded via
+                                // config-center.rc. MAKEINTRESOURCEW(1).
+                                let hicon = LoadIconW(None, PCWSTR(1usize as *const u16));
+                                if let Ok(hicon) = hicon {
+                                        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(hicon.0 as isize)));
+                                        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(hicon.0 as isize)));
                                 }
                         }
                         BOOL(1)
@@ -692,7 +699,10 @@ impl Component for ConfigCenter {
                                                 "A Cantonese Jyutping input method for Windows, reimplemented in Rust.",
                                                 "用 Rust 實現嘅 Windows 粵拼輸入法。",
                                         )),
-                                        TextBlock::new().text_wrapping(TextWrapping::Wrap).text("github.com/Ceplavia/CYAN-R-Cantonese"),
+                                        HyperlinkButton::new()
+                                                .navigate_uri("https://github.com/Ceplavia/CYAN-R-Cantonese")
+                                                .map(|b| b.content("Github"))
+                                                .unwrap_or_else(|_| HyperlinkButton::new().content("Github")),
                                 ))
                                 .into(),
                 };
