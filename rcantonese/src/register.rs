@@ -92,6 +92,27 @@ fn find_ime_hkl() -> Option<HKL> {
 /// the registered HKL. Idempotent — if a KLID already points at our file
 /// we just reuse it.
 fn install_imm32_ime() -> Option<HKL> {
+        let hkl = install_imm32_ime_inner();
+        if let Some(hkl) = hkl {
+                // Fixups are cheap and idempotent — run them even when the
+                // KLID already exists, because older installs may have
+                // baked a plain-keyboard substitute into the CTF
+                // assembly binding and user substitutes.
+                let klid = format!("{:08X}", hkl.0 as usize as u32);
+                // Legacy Substitutes map: activating the base zh-HK
+                // keyboard yields our IME instead — the classic way
+                // IMM32 apps (WoW/EVE) load .ime files.
+                set_base_layout_substitute(&klid);
+                // The per-user CTF assembly binding caches the keyboard
+                // layout handed to legacy apps — if it was written before
+                // the E-KLID existed it points at a plain keyboard and the
+                // .ime never loads.
+                fix_assembly_keyboard_layout(hkl);
+        }
+        hkl
+}
+
+fn install_imm32_ime_inner() -> Option<HKL> {
         if let Some(hkl) = find_ime_hkl() {
                 return Some(hkl);
         }
@@ -254,6 +275,75 @@ fn set_base_layout_substitute(klid: &str) {
                 let ok = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_SZ, Some(bytes));
                 globals::log_error(&format!("IME01: Substitutes[{base}]={klid} set={ok:?}"));
                 let _ = RegCloseKey(key);
+        }
+}
+
+/// Rewrite the per-user CTF assembly binding's KeyboardLayout to our
+/// E-KLID. `HKCU\Software\Microsoft\CTF\Assemblies\<langid>\<assembly>`
+/// caches the layout legacy apps get when our TIP is selected — entries
+/// created before the .ime existed pin a plain keyboard (e.g. 0x04090C04)
+/// so the IME never loads in IMM32 apps. Only touches assemblies whose
+/// Default is our CLSID.
+fn fix_assembly_keyboard_layout(ime_hkl: HKL) {
+        let root_path = wide_string("SOFTWARE\\Microsoft\\CTF\\Assemblies");
+        let our_clsid = format!("{:?}", CLSID_RCANTONESE).to_uppercase();
+        let mut root = HKEY::default();
+        unsafe {
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(root_path.as_ptr()), Some(0), KEY_READ, &mut root)
+                        != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let mut lang = [0u16; 64];
+                let mut i = 0u32;
+                loop {
+                        let mut len = lang.len() as u32;
+                        if RegEnumKeyExW(root, i, Some(PWSTR(lang.as_mut_ptr())), &mut len, None, None, None, None)
+                                != ERROR_SUCCESS
+                        {
+                                break;
+                        }
+                        i += 1;
+                        let lang_name = String::from_utf16_lossy(&lang[..len as usize]);
+                        for assembly in ["{34745C63-B2F0-4784-8B67-5E12C8701A31}"] {
+                                let sub = format!("SOFTWARE\\Microsoft\\CTF\\Assemblies\\{lang_name}\\{assembly}");
+                                let sub_w = wide_string(&sub);
+                                let mut key = HKEY::default();
+                                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sub_w.as_ptr()), Some(0), KEY_READ | KEY_WRITE, &mut key)
+                                        != ERROR_SUCCESS
+                                {
+                                        continue;
+                                }
+                                let mut buf = [0u16; 64];
+                                let mut size = (buf.len() * 2) as u32;
+                                let ok = RegQueryValueExW(
+                                        key,
+                                        w!("Default"),
+                                        None,
+                                        None,
+                                        Some(buf.as_mut_ptr() as *mut u8),
+                                        Some(&mut size),
+                                ) == ERROR_SUCCESS;
+                                if ok {
+                                        let cur = String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]);
+                                        if cur.trim_matches(char::from(0)).eq_ignore_ascii_case(&our_clsid) {
+                                                let _ = RegSetValueExW(
+                                                        key,
+                                                        w!("KeyboardLayout"),
+                                                        Some(0),
+                                                        REG_DWORD,
+                                                        Some(&(ime_hkl.0 as usize as u32).to_le_bytes()),
+                                                );
+                                                globals::log(&format!(
+                                                        "IME01: assembly {lang_name} KeyboardLayout -> {:08X}",
+                                                        ime_hkl.0 as usize as u32
+                                                ));
+                                        }
+                                }
+                                let _ = RegCloseKey(key);
+                        }
+                }
+                let _ = RegCloseKey(root);
         }
 }
 
