@@ -161,6 +161,7 @@ impl Session {
                 self.composing = true;
                 ctx::push_message(self.imc(), WM_IME_STARTCOMPOSITION, 0, 0);
                 self.position_window();
+                ctx::push_message(self.imc(), WM_IME_NOTIFY, IMN_CHANGECANDIDATE as usize, 0);
                 ctx::push_message(self.imc(), WM_IME_NOTIFY, IMN_OPENCANDIDATE as usize, 0);
         }
 
@@ -223,6 +224,10 @@ impl Session {
                         (GCS_COMPSTR.0 | GCS_CURSORPOS.0) as isize,
                 );
                 ctx::push_message(self.imc(), WM_IME_NOTIFY, IMN_CHANGECANDIDATE as usize, 0);
+                // Feed hCandInfo for apps that render their own IME UI
+                // (games read CANDIDATELIST on IMN_* and draw in-engine).
+                let texts: Vec<String> = self.items.iter().map(|c| c.text.clone()).collect();
+                let _ = ctx::write_candlist(self.imc(), &texts, self.selection as u32, self.settings.candidate_page_size);
                 if self.items.is_empty() {
                         ui::hide_candidates();
                 } else {
@@ -766,6 +771,24 @@ pub fn on_select(himc: HIMC, selected: bool) {
                         }
                 }
         }
+}
+
+/// NotifyIME — apps adjust caret/composition position and open state here.
+pub fn on_notify(himc: HIMC, action: u32) {
+        if action == IMN_SETCOMPOSITIONWINDOW || action == IMN_SETCANDIDATEPOS {
+                with_session(himc, |s| s.position_window());
+        } else if action == IMN_SETOPENSTATUS {
+                // App closed the IME (e.g. game closed its chat box) —
+                // drop any pending composition the weasel way.
+                if let Some(imc) = ctx::lock_imc(himc) {
+                        let open = imc.fOpen;
+                        ctx::unlock_imc(himc);
+                        if !open.as_bool() {
+                                with_session(himc, |s| s.cancel());
+                        }
+                }
+        }
+        // IMN_SETOPENSTATUS: app toggled fOpen — re-read in process_key.
 }
 
 pub fn process_key(himc: HIMC, vk: u32, lparam: isize, keystate: &[u8; 256]) -> bool {

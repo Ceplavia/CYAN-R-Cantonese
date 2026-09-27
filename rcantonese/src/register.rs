@@ -51,7 +51,7 @@ fn find_ime_hkl() -> Option<HKL> {
                         return None;
                 }
                 let mut found = None;
-                for index in 0x20u32..=0xFF {
+                for index in 0u32..=0xFF {
                         let klid = e_series_klid(index);
                         let sub = wide_string(&klid);
                         let mut key = HKEY::default();
@@ -111,13 +111,17 @@ fn install_imm32_ime() -> Option<HKL> {
                         PCWSTR(file.as_ptr()),
                         PCWSTR(text.as_ptr()),
                 );
-                if !hkl.is_invalid() {
+                if !hkl.0.is_null() {
                         return Some(hkl);
                 }
+                // ImmInstallIMEW returns NULL on failure — HKL::is_invalid
+                // tests for INVALID_HANDLE_VALUE (-1), so check the raw
+                // pointer here or we'd treat failure as success.
+                globals::log_error("IME01: ImmInstallIMEW failed, manual KLID fallback");
                 // Manual fallback — ImmInstallIMEW can decline when the E-
                 // series space it wants is taken; scan for a free slot and
                 // write the values directly (weasel's fallback).
-                for index in 0x20u32..=0xFF {
+                for index in 0u32..=0xFF {
                         let klid = e_series_klid(index);
                         let sub = format!("SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts\\{klid}");
                         let sub_wide = wide_string(&sub);

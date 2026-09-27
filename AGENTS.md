@@ -73,6 +73,11 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 - **註冊**：`register.rs` `install_imm32_ime()` → `ImmInstallIMEW(sysdir\r-cantonese.ime)` 起 `E0xx0C04` KLID（scan `Ime File` 搵返）→ `RegisterProfile` 用佢做 `hklSubstitute`。**要 UnregisterProfile 先再 RegisterProfile**，否則舊 profile 嘅 substitute 唔更新（TF_E_ALREADY_EXISTS early-exit）
 - **中英切換**：clean Shift tap（keyup 且中途冇其它掣）→ `ImmSetOpenStatus` 反轉；WoW 開 chat box 時自己會 set open
 - **測試**：`cargo test -p r-cantonese-ime` — `immhost.rs` 係 synthetic IMM32 host（真 HWND+IMC+message pump），驗證 commit 字串行到 app
+- **Bug fixed（09-28 實測 WoW 冇 load）**：`ImmInstallIMEW` 失敗返 **NULL(0)**，`HKL::is_invalid()` 查嘅係 -1 → 當咗成功 → fallback 冇行 + substitute=NULL。改用 `hkl.0.is_null()` check + `log_error` 痕迹
+- **KLID scan**：`ImmInstallIMEW` 慣用 `E001` 起 — scan/建立範圍改做 `E000`..`E0FF`（原本由 0x20 起會 miss 低）
+- **Game 自繪 IME UI**：`hCandInfo` 寫標準 `CANDIDATELIST`（6 dword header + offset 陣 + UTF-16 串）+ 每次 sync 推 `IMN_CHANGECANDIDATE`/`OPENCANDIDATE`/`CLOSECANDIDATE` — WoW/EVE 自己讀就畫到自己 UI；weasel 都冇寫 candinfo，佢哋 SPECIAL_UI 自己畫，遊戲照樣畫遊戲 UI（唔會讀 candinfo 嘅遊戲先跟 SPECIAL_UI）
+- **NotifyIME**：`IMN_SETCOMPOSITIONWINDOW`/`IMN_SETCANDIDATEPOS` → 重排候選窗；`IMN_SETOPENSTATUS` → fOpen=false 時 cancel 未 commit 嘅 composition（遊戲閂 chat box）
+- **「簡體默認」根因假設**：`set_character_variant` 會 save_settings 寫返 toml — 任何 processor 喺 simplified-era load 嘅話，之後任何 persist 都會將 simplified 寫返入去（self-perpetuating）。遊戲按 Ctrl+Shift+4 嘅 keybind 係常見 footgun
 
 ### ✅ 後續修咗（2026-09-21）
 - **Release 冇候選**：`RCANTONESE_SKIP_ENGINE` gate 寫反 — `cfg!(debug_assertions)` false → else 永遠行 → engine 永遠 None。改返 `is_ok()` 先 skip。

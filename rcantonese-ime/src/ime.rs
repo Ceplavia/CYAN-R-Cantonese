@@ -124,8 +124,11 @@ extern "system" fn ImeToAsciiEx(
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn NotifyIME(_himc: HIMC, _action: u32, _index: u32, _value: u32) -> BOOL {
-        BOOL(1)
+extern "system" fn NotifyIME(himc: HIMC, action: u32, _index: u32, _value: u32) -> BOOL {
+        guarded("NotifyIME", BOOL(0), || {
+                session::on_notify(himc, action);
+                BOOL(1)
+        })
 }
 
 #[unsafe(no_mangle)]
