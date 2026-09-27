@@ -642,7 +642,12 @@ impl CandidateListPresenter {
                                 }
                         }
                         globals::log(&format!("BeginUIElement ok: show={} id={id}", show.as_bool()));
-                        presenter.is_show_mode.store(show.as_bool(), Ordering::Relaxed);
+                        // We draw our own window regardless of the
+                        // framework's show hint — apps where the IME is
+                        // already active at startup often report
+                        // show=false on the first BeginUIElement and the
+                        // window would never appear (verified 09-28).
+                        presenter.is_show_mode.store(true, Ordering::Relaxed);
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
                         if !show.as_bool() {
                                 presenter.updated_flags.store(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
@@ -899,12 +904,17 @@ impl CandidateListPresenter {
                         if self.is_show_mode.load(Ordering::Relaxed) && !self.hide_window {
                                 let visible = window.is_visible();
                                 drop(guard);
-                                if self.move_window_to_text_ext() || visible {
-                                        let guard = self.window.lock().unwrap_or_else(|e| e.into_inner());
-                                        if let Some(window) = guard.as_ref() {
-                                                window.show(true);
-                                                window.invalidate();
-                                        }
+                                let _ = visible;
+                                // Attempt the synchronous position first —
+                                // failure queues an async session that both
+                                // moves AND shows the window. Show regardless:
+                                // a briefly-misplaced window beats an
+                                // invisible one on first activation.
+                                let _ = self.move_window_to_text_ext();
+                                let guard = self.window.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(window) = guard.as_ref() {
+                                        window.show(true);
+                                        window.invalidate();
                                 }
                                 return;
                         }

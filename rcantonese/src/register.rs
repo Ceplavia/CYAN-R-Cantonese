@@ -404,7 +404,16 @@ pub fn register_profiles() -> bool {
                 // Link the profile to our IMM32 .ime via an E-series
                 // keyboard layout — IMM32 apps (WoW etc.) load the .ime
                 // directly instead of going through the CTF bridge.
-                let substitute = install_imm32_ime().unwrap_or_default();
+                // Ensure the .ime side exists (KLID + Preload + Substitutes)
+                // but hand CTF the BASE layout klid — legacy activation
+                // resolves through Keyboard Layout\Substitutes into our
+                // IME. Passing the E-KLID directly fails: Windows loads it
+                // as a plain keyboard, never as an IME (09-28 verified).
+                let _ = install_imm32_ime();
+                // The loaded HKL of our IME-under-substitutes: (langid<<16)|langid.
+                // Substitutes[00000c04]=E-klid binds this handle to our .ime.
+                let hkl_val = ((TEXTSERVICE_LANGID as isize) << 16) | TEXTSERVICE_LANGID as isize;
+                let substitute = HKL(hkl_val as *mut _);
                 if !substitute.is_invalid() {
                         // Re-register so upgrades pick up the substitute —
                         // RegisterProfile alone early-exits on existing
