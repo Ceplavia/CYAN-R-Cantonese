@@ -460,6 +460,7 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
 
         fn OnTestKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
                 globals::guarded("OnTestKeyDown", || {
+                        globals::log_error(&format!("OnTestKeyDown vk={:#04x} pid={}", wparam.0, std::process::id()));
                         let Some(mut state) = self.try_lock() else { return Ok(BOOL(0)) };
                         let Some(context) = pic.as_ref() else { return Ok(BOOL(0)) };
                         let r = crate::keys::test_key(&mut state, context, wparam.0, lparam.0, true);
@@ -587,12 +588,7 @@ impl ITfActiveLanguageProfileNotifySink_Impl for RCantoneseService_Impl {
                                         return Ok(());
                                 }
                         }
-                        if factivated.as_bool() {
-                                // Windows may have (re)seeded the CTF
-                                // assembly binding with a plain keyboard
-                                // — heal it so IMM32 apps get our .ime hkl.
-                                crate::register::heal_imm32_assembly_binding();
-                        }
+
                         let Some(state) = self.try_lock() else { return Ok(()) };
                         if let Some(processor) = state.processor.as_ref() {
                                 let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());

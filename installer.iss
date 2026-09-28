@@ -36,17 +36,15 @@ VersionInfoVersion={#AppVersion}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-; The IME DLL may be loaded in injected processes — restartreplace queues
-; the new image for the next reboot instead of failing the copy.
-Source: "target\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese.dll"; Flags: restartreplace ignoreversion
-; IMM32 (.ime) front-end — legacy/IMM32 apps (games like WoW) load this
-; directly through the E-series keyboard layout registered by regsvr32.
-Source: "target\release\r_cantonese_ime.dll"; DestDir: "{sys}"; DestName: "r-cantonese.ime"; Flags: restartreplace ignoreversion
+; The IME DLL goes into System32, not {app} — protected apps (e.g. WoW)
+; only allow system-directory loads, and its registration path equals the
+; load path. restartreplace queues the new image for the next reboot when
+; injected processes hold the old one open.
+Source: "target\release\r_cantonese.dll"; DestDir: "{sys}"; DestName: "r-cantonese.dll"; Flags: restartreplace ignoreversion
 ; 32-bit twin — 32-bit processes can't load a 64-bit COM dll (this is why
 ; injection "failed" in some apps: they were x86). Registered via SysWOW64
 ; regsvr32 → WOW6432Node.
-Source: "target\i686-pc-windows-msvc\release\r_cantonese.dll"; DestDir: "{app}"; DestName: "r-cantonese-x86.dll"; Flags: restartreplace ignoreversion
-Source: "target\i686-pc-windows-msvc\release\r_cantonese_ime.dll"; DestDir: "{syswow64}"; DestName: "r-cantonese.ime"; Flags: restartreplace ignoreversion
+Source: "target\i686-pc-windows-msvc\release\r_cantonese.dll"; DestDir: "{syswow64}"; DestName: "r-cantonese-x86.dll"; Flags: restartreplace ignoreversion
 ; restartreplace on the exes too — injected IME hosts respawn the tray on
 ; demand, so it can reappear between our taskkill and the file copy; a
 ; locked exe then queues for reboot instead of popping a DeleteFile error.
@@ -73,10 +71,12 @@ Source: "target\release\zh-CN\*"; DestDir: "{app}\zh-CN"; Flags: ignoreversion s
 
 [Run]
 ; Register the IME (CLSID + TSF profile + categories + InstallLayoutOrTip
-; enable + tray autostart Run key — all inside DllRegisterServer).
-Filename: "regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese..."
+; enable + tray autostart Run key — all inside DllRegisterServer). The
+; registered path is the System32 copy — the load path matters for
+; protected apps.
+Filename: "regsvr32.exe"; Parameters: "/s ""{sys}\r-cantonese.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese..."
 ; 32-bit view of regsvr32 → writes WOW6432Node CLSID + TIP for x86 apps.
-Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese (32-bit)..."
+Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{syswow64}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; StatusMsg: "Registering R-Cantonese (32-bit)..."
 ; Tray host + config center launch at ssPostInstall via ExecAsOriginalUser
 ; (see [Code]) — a [Run] entry would pop an "unable to execute" dialog when
 ; spawning as the original user fails (e.g. standard user who elevated with
@@ -85,8 +85,8 @@ Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s ""{app}\r-cantonese-x86.dll
 [UninstallRun]
 ; Before files are deleted: unregister the IME (drops the input tip, the
 ; TSF profile, the CLSID entry and the tray autostart value).
-Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s /u ""{app}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterIME32"
-Filename: "regsvr32.exe"; Parameters: "/s /u ""{app}\r-cantonese.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterIME"
+Filename: "{syswow64}\regsvr32.exe"; Parameters: "/s /u ""{syswow64}\r-cantonese-x86.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterIME32"
+Filename: "regsvr32.exe"; Parameters: "/s /u ""{sys}\r-cantonese.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterIME"
 
 [Code]
 procedure KillHelper(const ExeName: String);

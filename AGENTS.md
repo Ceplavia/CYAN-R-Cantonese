@@ -62,22 +62,22 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 5. **重裝時「提權失敗」提示** — Inno `[Run]` 嘅 `runasoriginaluser` 喺某啲機 spawn 失敗會彈 error dialog；搬咗入 `[Code]` 用 `ExecAsOriginalUser` + 靜默失敗（login autostart 兜底）。
 6. **默認簡體** — code 默認係 Traditional（`settings.rs:74`）；settings.toml 冇嘅話唔會自動寫。**懷疑係嗰部機之前有存「simplified」嘅 toml** — 非 code bug，待確認。
 
-### 🚧 IMM32 `.ime`（WoW 支援，2026-09-28）
-- **根因**：WoW 係 IMM32 app — 揀咗 TIP 之後 Windows 只會俾佢一個鍵盤 layout；`hklSubstitute=NULL` 嘅 profile 只能靠 CTF→IMM bridge，WoW 冇行呢條路 → dll 根本冇被 load（log 冇 activate）
-- **做法照 weasel 雙棲**：`rcantonese-ime` crate → `r-cantonese.ime`（x64 `{sys}`、x86 `{syswow64}`）— 獨立 IMM32 IME，唔係 TSF shim
-- **Exports**：15 個 IMM32 標準 export（`ImeInquire/Select/ProcessKey/ToAsciiEx(=0)/NotifyIME/...`）+ `exports.def`（x86 stdcall 預設 `_name@N` decorated → GetProcAddress 搵唔到，def 保證 undecorated）
-- **ImeInquire**：`IME_PROP_UNICODE | IME_PROP_SPECIAL_UI` — SPECIAL_UI 話俾 app 知唔使畫 IME UI，候選窗我哋自己畫（遊戲都唔會畫）
-- **Message 流**：`ImeProcessKey` 食掣 → 狀態機（session.rs）→ `push_message` 寫 TRANSMSG 入 `hMsgBuf` + `ImmGenerateMessage` 派俾 app window；commit 寫 `hCompStr` result_str + `WM_IME_COMPOSITION(GCS_COMP|GCS_RESULTSTR)` + `WM_IME_ENDCOMPOSITION`
-- **`hCompStr` 陷阱**：`ImmCreateIMCC` **預填 `dwSize=sizeof(COMPOSITIONSTRING)=100`** 唔係 0 — 我哋 CompInfo 要 check `dwCompStrOffset==0` 先 reset（否則 app 讀 result 讀到 header bytes = "d"）
-- **Session**：`HashMap<HIMC, Session>` per-process；engine/db/settings/punctuation/variant 全部 `#[path]` 共享 rcantonese — 冇 COM 依賴
-- **註冊**：`register.rs` `install_imm32_ime()` → `ImmInstallIMEW(sysdir\r-cantonese.ime)` 起 `E0xx0C04` KLID（scan `Ime File` 搵返）→ `RegisterProfile` 用佢做 `hklSubstitute`。**要 UnregisterProfile 先再 RegisterProfile**，否則舊 profile 嘅 substitute 唔更新（TF_E_ALREADY_EXISTS early-exit）
-- **中英切換**：clean Shift tap（keyup 且中途冇其它掣）→ `ImmSetOpenStatus` 反轉；WoW 開 chat box 時自己會 set open
-- **測試**：`cargo test -p r-cantonese-ime` — `immhost.rs` 係 synthetic IMM32 host（真 HWND+IMC+message pump），驗證 commit 字串行到 app
-- **Bug fixed（09-28 實測 WoW 冇 load）**：`ImmInstallIMEW` 失敗返 **NULL(0)**，`HKL::is_invalid()` 查嘅係 -1 → 當咗成功 → fallback 冇行 + substitute=NULL。改用 `hkl.0.is_null()` check + `log_error` 痕迹
-- **KLID scan**：`ImmInstallIMEW` 慣用 `E001` 起 — scan/建立範圍改做 `E000`..`E0FF`（原本由 0x20 起會 miss 低）
-- **Game 自繪 IME UI**：`hCandInfo` 寫標準 `CANDIDATELIST`（6 dword header + offset 陣 + UTF-16 串）+ 每次 sync 推 `IMN_CHANGECANDIDATE`/`OPENCANDIDATE`/`CLOSECANDIDATE` — WoW/EVE 自己讀就畫到自己 UI；weasel 都冇寫 candinfo，佢哋 SPECIAL_UI 自己畫，遊戲照樣畫遊戲 UI（唔會讀 candinfo 嘅遊戲先跟 SPECIAL_UI）
-- **NotifyIME**：`IMN_SETCOMPOSITIONWINDOW`/`IMN_SETCANDIDATEPOS` → 重排候選窗；`IMN_SETOPENSTATUS` → fOpen=false 時 cancel 未 commit 嘅 composition（遊戲閂 chat box）
-- **「簡體默認」根因假設**：`set_character_variant` 會 save_settings 寫返 toml — 任何 processor 喺 simplified-era load 嘅話，之後任何 persist 都會將 simplified 寫返入去（self-perpetuating）。遊戲按 Ctrl+Shift+4 嘅 keybind 係常見 footgun
+### ✅ WoW 純 TSF bridge（2026-09-28 實測過關，IMM32 路線已移除）
+
+**結論**：weasel 已係純 TSF — WoW 呢類 cicero-unaware app 係經 **CTF→IMM bridge**（msctfime dummy + process 內 host TIP）行到輸入法，唔需要 `.ime`。之前 `.ime`/`E-KLID`/`hklSubstitute` 路線已鏟走。
+
+**WoW 之前 activate 唔到嘅三個真·根因**（log 完全冇 activate = 連 COM 都冇入到）：
+1. **路徑 allowlist** — WoW 淨俾 `C:\Windows\System32` 嘅 dll load；`Program Files`/`D:\rust_proj` 都俾擋。所以 installer 而家將 `r-cantonese.dll` 裝落 `{sys}`（x86 裝 `{syswow64}`），**唔係 `{app}`**。
+2. **橋 dummy** — zh-Hant-HK tips entry 要係 `0404:{clsid}{guid}`（zh-TW langid → dummy `0x04040404`），唔係 `0C04:`（dummy `0x04090c04` — zh-HK 冇原生鍵盤，行唔到）。ILOT 唔可以 cross-language → tray `ensure_hk_tip_entry` 直接寫 `HKCU\Control Panel\International\User Profile\zh-Hant-HK` 嘅 DWORD tips entry。
+3. **`hklSubstitute` 係毒** — profile 有 substitute → ctf 當佢 IME-backed → legacy app 行 hkl 直達唔行 bridge → WoW revert 返 weasel。`RegisterProfile` 而家唔俾 substitute，兩個 langid（0x0c04 + 0x0404）都註。
+
+**Bridge 底下嘅候選窗**：WoW 自己讀 `CANDIDATELIST` 畫候選框 → 我哋自繪窗會雙重。檢測 = weasel 嘅 CUAS test：**`GetTextExt` 返 degenerate rect（`top==bottom`/`left==right`）→ cicero-unaware host** → `CandidateListPresenter.bridge_detected` → `show()`/`refresh_window` skip。Bridge 下 candidate data 照樣經 element 供俾 host — 遊戲自繪、普通 legacy app 由系統 `IME` 窗兜。`is_show_mode` 照常 set → 數字/space 揀字仲 work。
+
+**DB 路徑**：`default_database_path` 係 module-dir 優先 → `%ProgramFiles%\R-Cantonese` fallback — 因為 dll 依家喺 System32，但 db 喺 Program Files。
+
+**ImmIsIME 陷阱**：`0x04040404`/`0x04090c04`/`0x4090409` 全部都 `ImmIsIME=1`（bridge dummy — device-id 係 IME id）— 唔好當佢哋係 plain keyboard；`0x04040404` 先係 zh-TW 真·dummy。
+
+**HKCU CTF binding 係 login-time cache**：`Assemblies\*\KeyboardLayout`/`AssemblyItem`/`User Profile` 手寫咗要 sign out/in 先俾 ctfmon 讀 — reboot 之後仲會俾 Windows 跟 language association 重新 seed 返（逐次手改冇用，要改個 source：profiles/tips entries）。
 
 ### ✅ 後續修咗（2026-09-21）
 - **Release 冇候選**：`RCANTONESE_SKIP_ENGINE` gate 寫反 — `cfg!(debug_assertions)` false → else 永遠行 → engine 永遠 None。改返 `is_ok()` 先 skip。

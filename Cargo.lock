@@ -117,15 +117,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "r-cantonese-ime"
-version = "0.9.3"
-dependencies = [
- "embed-resource",
- "windows",
- "windows-core 0.62.2",
-]
-
-[[package]]
 name = "r-cantonese-tray"
 version = "0.9.3"
 dependencies = [

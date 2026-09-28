@@ -40,7 +40,10 @@ const PRUNE_TIMER_ID: usize = 1;
 
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
 /// Our input tip — `{langid}:{clsid}{profile_guid}` for InstallLayoutOrTip.
-const INPUT_TIP: &str = "0C04:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+/// The user-visible entry is the 0404 (zh-TW-langid) profile — Weasel's
+/// approach for HK users: cicero-unaware apps then get the 0x04040404
+/// dummy which hosts our TIP through the CTF bridge.
+const INPUT_TIP: &str = "0404:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
 
 // windows-link raw-dylib import — no import lib / GetProcAddress needed.
 windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flags: u32) -> BOOL);
@@ -50,11 +53,12 @@ windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flag
 /// the tray runs as the logged-in user at every login anyway.
 fn ensure_input_tip() {
         unsafe {
-                let wide: Vec<u16> = INPUT_TIP.encode_utf16().chain(Some(0)).collect();
-                let ok = InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0);
-                if !ok.as_bool() {
-                        log_error("InstallLayoutOrTip failed (tray ensure)");
-                }
+                // ILOT lands on zh-TW's own tips list (the tip's langid
+                // selects the language), not zh-Hant-HK — write the entry
+                // directly into zh-Hant-HK's User Profile key instead: a
+                // DWORD whose name is the tip string and whose value is the
+                // sort order (next free index).
+                ensure_hk_tip_entry();
                 // If zh-HK itself isn't in the user's language list the tip has
                 // nowhere to attach (seen on zh-CN-only systems). Installing the
                 // zh-HK "US" keyboard forces the language into the list; our tip
@@ -65,6 +69,70 @@ fn ensure_input_tip() {
                         if !InstallLayoutOrTip(PCWSTR(kb.as_ptr()), 0).as_bool() {
                                 log_error("InstallLayoutOrTip failed (zh-HK language)");
                         }
+                }
+        }
+}
+
+/// Write `0404:{clsid}{guid}` into zh-Hant-HK's input-method list —
+/// HKCU\Control Panel\International\User Profile\zh-Hant-HK holds DWORD
+/// ordering values named by tip string. Idempotent.
+fn ensure_hk_tip_entry() {
+        use windows::Win32::System::Registry::*;
+        unsafe {
+                let key_path: Vec<u16> = "Control Panel\\International\\User Profile\\zh-Hant-HK"
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
+                let mut key = HKEY::default();
+                if RegCreateKeyW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()), &mut key) != ERROR_SUCCESS {
+                        log_error("ensure_hk_tip_entry: key open failed");
+                        return;
+                }
+                let name: Vec<u16> = INPUT_TIP.encode_utf16().chain(Some(0)).collect();
+                let mut exists = [0u8; 4];
+                let mut size = 4u32;
+                if RegQueryValueExW(
+                        key,
+                        PCWSTR(name.as_ptr()),
+                        None,
+                        None,
+                        Some(exists.as_mut_ptr()),
+                        Some(&mut size),
+                ) == ERROR_SUCCESS
+                {
+                        let _ = RegCloseKey(key);
+                        return;
+                }
+                // Next ordering index = max existing DWORD value + 1.
+                let mut index = 1u32;
+                let mut i = 0u32;
+                loop {
+                        let mut nbuf = [0u16; 128];
+                        let mut nlen = nbuf.len() as u32;
+                        let mut data = [0u8; 4];
+                        let mut dlen = 4u32;
+                        if RegEnumValueW(
+                                key,
+                                i,
+                                Some(PWSTR(nbuf.as_mut_ptr())),
+                                &mut nlen,
+                                None,
+                                None,
+                                Some(data.as_mut_ptr()),
+                                Some(&mut dlen),
+                        ) != ERROR_SUCCESS
+                        {
+                                break;
+                        }
+                        i += 1;
+                        if dlen == 4 {
+                                index = index.max(u32::from_le_bytes(data) + 1);
+                        }
+                }
+                let ok = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&index.to_le_bytes()));
+                let _ = RegCloseKey(key);
+                if ok != ERROR_SUCCESS {
+                        log_error("ensure_hk_tip_entry: write failed");
                 }
         }
 }

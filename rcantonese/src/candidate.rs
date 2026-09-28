@@ -404,6 +404,12 @@ pub struct CandidateListPresenter {
         service: IUnknown,
         page_size: usize,
         hide_window: bool,
+        /// Set when GetTextExt reports a degenerate rect — the signature of a
+        /// cicero-unaware (CUAS/IMM bridge) host that can't position UI. The
+        /// bridge already hands the app a standard CANDIDATELIST (games draw
+        /// it in-engine; classic apps get the system IME window), so our own
+        /// window is suppressed there.
+        bridge_detected: std::sync::Arc<AtomicBool>,
 
         window_state: std::sync::Arc<Mutex<CandidateWindowState>>,
         window: Mutex<Option<CandidateWindow>>,
@@ -430,6 +436,7 @@ impl CandidateListPresenter {
                         service: service.clone(),
                         page_size: page_size.max(1),
                         hide_window,
+                        bridge_detected: std::sync::Arc::new(AtomicBool::new(false)),
                         window_state: std::sync::Arc::new(Mutex::new(CandidateWindowState::default())),
                         window: Mutex::new(None),
                         document_mgr: Mutex::new(None),
@@ -744,6 +751,10 @@ impl CandidateListPresenter {
                         let mut rect = RECT::default();
                         let mut clipped = BOOL(0);
                         if unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped) }.is_ok() {
+                                if rect.top == rect.bottom || rect.left == rect.right {
+                                        self.bridge_detected.store(true, Ordering::Relaxed);
+                                        return true;
+                                }
                                 let (width, height) = {
                                         let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
                                         (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)
@@ -757,6 +768,7 @@ impl CandidateListPresenter {
                         }
                 }
                 let is_show = self.is_show_mode.load(Ordering::Relaxed);
+                let bridge_detected = self.bridge_detected.clone();
                 let _ = crate::composition::request_edit_session(
                         &self.service,
                         &context,
@@ -766,6 +778,10 @@ impl CandidateListPresenter {
                                 let mut rect = RECT::default();
                                 let mut clipped = BOOL(0);
                                 unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped)? };
+                                if rect.top == rect.bottom || rect.left == rect.right {
+                                        bridge_detected.store(true, Ordering::Relaxed);
+                                        return Ok(());
+                                }
                                 let (width, height) = {
                                         let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
                                         (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)
@@ -774,7 +790,7 @@ impl CandidateListPresenter {
                                 let (nx, ny) = CandidateWindow::clamp_to_work_area(rect.left, rect.bottom + 2, w, h, rect.top);
                                 unsafe {
                                         let _ = MoveWindow(hwnd, nx, ny, w, h, true);
-                                        if is_show {
+                                        if is_show && !bridge_detected.load(Ordering::Relaxed) {
                                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                                                 let _ = InvalidateRect(Some(hwnd), None, true);
                                         }
@@ -788,7 +804,7 @@ impl CandidateListPresenter {
         fn refresh_window(&self) {
                 let guard = self.window.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(window) = guard.as_ref() {
-                        if self.is_show_mode.load(Ordering::Relaxed) && !self.hide_window {
+                        if self.is_show_mode.load(Ordering::Relaxed) && !self.hide_window && !self.bridge_detected.load(Ordering::Relaxed) {
                                 let visible = window.is_visible();
                                 drop(guard);
                                 let _ = visible;
@@ -800,7 +816,7 @@ impl CandidateListPresenter {
                                 let _ = self.move_window_to_text_ext();
                                 let guard = self.window.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(window) = guard.as_ref() {
-                                        window.show(true);
+                                        window.show(!self.bridge_detected.load(Ordering::Relaxed));
                                         window.invalidate();
                                 }
                                 return;
@@ -847,6 +863,14 @@ impl CandidateListPresenter {
                         .unwrap_or(false);
                 if show_window && !self.hide_window {
                         let positioned = self.move_window_to_text_ext();
+                        if self.bridge_detected.load(Ordering::Relaxed) {
+                                // Bridge host — candidates surface through the
+                                // synthesized CANDIDATELIST; keep ours hidden.
+                                if let Some(window) = self.window.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                                        window.show(false);
+                                }
+                                return;
+                        }
                         if let Some(window) = self.window.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                                 window.show(positioned || visible);
                         }

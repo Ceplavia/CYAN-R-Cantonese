@@ -9,6 +9,10 @@ use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 pub const TEXTSERVICE_MODEL: &str = "Apartment";
 // MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_HONGKONG)
 pub const TEXTSERVICE_LANGID: u16 = 0x0c04;
+/// zh-TW (Traditional) — Weasel-style: HK users' tips entry uses the 0404
+/// langid so cicero-unaware apps get the 0x04040404 dummy, which hosts our
+/// TIP in-process through the CTF bridge (native .ime is gone).
+pub const TEXTSERVICE_BRIDGE_LANGID: u16 = 0x0404;
 pub const TEXTSERVICE_ICON_INDEX: u32 = 12; // -IDIS_IME
 pub const TEXTSERVICE_SQLITE_DATA: &str = "ime.sqlite3";
 
@@ -148,12 +152,23 @@ pub fn module_path() -> Option<std::path::PathBuf> {
         Some(std::path::PathBuf::from(String::from_utf16_lossy(&buffer)))
 }
 
-/// Default path of ime.sqlite3: same directory as the DLL.
+/// Default path of ime.sqlite3. The TIP dll may live in System32 (some apps
+/// only allow system-directory loads) while the dictionary ships in the
+/// install dir — look beside the dll first, then the installed location.
 pub fn default_database_path() -> std::path::PathBuf {
-        match module_path() {
-                Some(path) => path.with_file_name(TEXTSERVICE_SQLITE_DATA),
-                None => std::path::PathBuf::from(TEXTSERVICE_SQLITE_DATA),
+        if let Some(path) = module_path() {
+                let beside = path.with_file_name(TEXTSERVICE_SQLITE_DATA);
+                if beside.exists() {
+                        return beside;
+                }
         }
+        if let Some(dir) = std::env::var_os("ProgramFiles") {
+                let candidate = std::path::PathBuf::from(dir).join("R-Cantonese").join(TEXTSERVICE_SQLITE_DATA);
+                if candidate.exists() {
+                        return candidate;
+                }
+        }
+        std::path::PathBuf::from(TEXTSERVICE_SQLITE_DATA)
 }
 
 /// File log path — %LOCALAPPDATA%\RCantonese\Logs\RCantonese.log, beside
