@@ -75,6 +75,12 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 
 **DB 路徑**：`default_database_path` 係 module-dir 優先 → `%ProgramFiles%\R-Cantonese` fallback — 因為 dll 依家喺 System32，但 db 喺 Program Files。
 
+**安裝/卸載規則**（dll 要喺 System32 — WoW 類 app 淨俾 system dir load，其它程序遲早都有同樣限制）：
+- 新裝：`r-cantonese.dll` → `{sys}`、`r-cantonese-x86.dll` → `{syswow64}`；**regsvr32 註嘅係 System32 嗰個**（註冊路徑 = load 路徑）
+- 升級 0.9.2 → 0.9.3：舊版 dll 喺 `{app}` — installer `ssInstall` 會先刪/搬埋佢（loaded file rename 得），CLSID 轉指 `{sys}` 嗰個
+- 卸載：**只郁我哋隻 dll**（`{sys}\r-cantonese.dll`、`{syswow64}\r-cantonese-x86.dll`）— loaded 就 rename `-old` + `MoveFileExW(DELAY_UNTIL_REBOOT)`；唔好掂 System32 其它嘢
+- 詞庫 `ime.sqlite3` 永遠喺 `{app}`（`Program Files\R-Cantonese`）— dll 經上面嘅 fallback path 搵返佢
+
 **ImmIsIME 陷阱**：`0x04040404`/`0x04090c04`/`0x4090409` 全部都 `ImmIsIME=1`（bridge dummy — device-id 係 IME id）— 唔好當佢哋係 plain keyboard；`0x04040404` 先係 zh-TW 真·dummy。
 
 **HKCU CTF binding 係 login-time cache**：`Assemblies\*\KeyboardLayout`/`AssemblyItem`/`User Profile` 手寫咗要 sign out/in 先俾 ctfmon 讀 — reboot 之後仲會俾 Windows 跟 language association 重新 seed 返（逐次手改冇用，要改個 source：profiles/tips entries）。

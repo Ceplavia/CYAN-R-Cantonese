@@ -106,6 +106,15 @@ begin
   begin
     KillHelper('r-cantonese-tray.exe');
     KillHelper('config-center.exe');
+    // Upgrades from <=0.9.2 left the dlls in {app}; they now live in
+    // {sys}/{syswow64}. Delete the stale copies — regsvr32 re-points the
+    // CLSID at the {sys} path, so a leftover {app} dll is dead weight.
+    // Loaded files can be renamed (not deleted) — move them aside.
+    AppDir := ExpandConstant('{app}');
+    if not DeleteFile(AppDir + '\r-cantonese.dll') then
+      RenameFile(AppDir + '\r-cantonese.dll', AppDir + '\r-cantonese-old.dll');
+    if not DeleteFile(AppDir + '\r-cantonese-x86.dll') then
+      RenameFile(AppDir + '\r-cantonese-x86.dll', AppDir + '\r-cantonese-x86-old.dll');
   end;
   if CurStep = ssPostInstall then
   begin
@@ -152,6 +161,25 @@ begin
     finally
       FindClose(FindRec);
     end;
+  end;
+  // The live dlls now sit in the system dirs — sweep ONLY our exact names;
+  // a loaded dll can't be deleted, so rename within the same volume then
+  // queue the renamed copy for delete-on-reboot.
+  Path := ExpandConstant('{sys}') + '\r-cantonese.dll';
+  if not DeleteFile(Path) then
+  begin
+    if RenameFile(Path, Path + '-old.dll') then
+      MoveFileExW(Path + '-old.dll', 0, MOVEFILE_DELAY_UNTIL_REBOOT)
+    else
+      MoveFileExW(Path, 0, MOVEFILE_DELAY_UNTIL_REBOOT);
+  end;
+  Path := ExpandConstant('{syswow64}') + '\r-cantonese-x86.dll';
+  if not DeleteFile(Path) then
+  begin
+    if RenameFile(Path, Path + '-old.dll') then
+      MoveFileExW(Path + '-old.dll', 0, MOVEFILE_DELAY_UNTIL_REBOOT)
+    else
+      MoveFileExW(Path, 0, MOVEFILE_DELAY_UNTIL_REBOOT);
   end;
   if FindFirst(AppDir + '\ime.sqlite3', FindRec) then
   begin
