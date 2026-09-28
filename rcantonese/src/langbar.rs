@@ -544,24 +544,15 @@ impl LangBarItem {
         }
 }
 
-/// Launch config-center.exe sitting next to this DLL.
+/// Launch config-center.exe — ships in the install dir (the dll itself
+/// may live in System32).
 fn launch_config_center() {
         unsafe {
-                let mut buf = [0u16; 512];
-                let n = windows::Win32::System::LibraryLoader::GetModuleFileNameW(Some(globals::dll_instance().into()), &mut buf) as usize;
-                if n == 0 {
+                let Some(path) = globals::installed_file_path("config-center.exe") else {
+                        crate::globals::log_error("config-center.exe not found");
                         return;
-                }
-                let mut path = String::from_utf16_lossy(&buf[..n]);
-                if let Some(pos) = path.rfind('\\') {
-                        path.truncate(pos + 1);
-                }
-                path.push_str("config-center.exe");
-                if !std::path::Path::new(&path).exists() {
-                        crate::globals::log_error("config-center.exe not found next to DLL");
-                        return;
-                }
-                let mut exe: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+                };
+                let mut exe: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
                 let result = windows::Win32::UI::Shell::ShellExecuteW(
                         None,
                         w!("open"),

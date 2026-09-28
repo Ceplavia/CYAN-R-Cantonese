@@ -447,23 +447,8 @@ fn process_name(pid: u32) -> String {
 /// install the DLL lives in System32 while the tray ships in the install
 /// dir — look beside the dll first, then %ProgramFiles%\R-Cantonese.
 fn tray_exe_path() -> Option<String> {
-        unsafe {
-                let mut buf = [0u16; 260];
-                let n = GetModuleFileNameW(Some(globals::dll_instance().into()), &mut buf) as usize;
-                if n == 0 {
-                        return None;
-                }
-                let dll = String::from_utf16_lossy(&buf[..n]);
-                let beside = dll.rsplit_once('\\').map(|(dir, _)| format!("{}\\r-cantonese-tray.exe", dir));
-                if let Some(path) = beside {
-                        if std::path::Path::new(&path).exists() {
-                                return Some(path);
-                        }
-                }
-        }
-        std::env::var_os("ProgramFiles").map(|dir| {
-                format!("{}\\R-Cantonese\\r-cantonese-tray.exe", dir.to_string_lossy())
-        })
+        globals::installed_file_path("r-cantonese-tray.exe")
+                .map(|p| p.to_string_lossy().into_owned())
 }
 
 // ---------------------------------------------------------------------

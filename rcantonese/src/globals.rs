@@ -152,23 +152,27 @@ pub fn module_path() -> Option<std::path::PathBuf> {
         Some(std::path::PathBuf::from(String::from_utf16_lossy(&buffer)))
 }
 
+/// Resolve a file that ships in the install dir: beside the dll first
+/// (dev layout), then %ProgramFiles%\R-Cantonese — a real install keeps
+/// the dll in System32 while data/exes live in the install dir.
+pub fn installed_file_path(file_name: &str) -> Option<std::path::PathBuf> {
+        if let Some(path) = module_path() {
+                let beside = path.with_file_name(file_name);
+                if beside.exists() {
+                        return Some(beside);
+                }
+        }
+        std::env::var_os("ProgramFiles")
+                .map(|dir| std::path::PathBuf::from(dir).join("R-Cantonese").join(file_name))
+                .filter(|p| p.exists())
+}
+
 /// Default path of ime.sqlite3. The TIP dll may live in System32 (some apps
 /// only allow system-directory loads) while the dictionary ships in the
 /// install dir — look beside the dll first, then the installed location.
 pub fn default_database_path() -> std::path::PathBuf {
-        if let Some(path) = module_path() {
-                let beside = path.with_file_name(TEXTSERVICE_SQLITE_DATA);
-                if beside.exists() {
-                        return beside;
-                }
-        }
-        if let Some(dir) = std::env::var_os("ProgramFiles") {
-                let candidate = std::path::PathBuf::from(dir).join("R-Cantonese").join(TEXTSERVICE_SQLITE_DATA);
-                if candidate.exists() {
-                        return candidate;
-                }
-        }
-        std::path::PathBuf::from(TEXTSERVICE_SQLITE_DATA)
+        installed_file_path(TEXTSERVICE_SQLITE_DATA)
+                .unwrap_or_else(|| std::path::PathBuf::from(TEXTSERVICE_SQLITE_DATA))
 }
 
 /// File log path — %LOCALAPPDATA%\RCantonese\Logs\RCantonese.log, beside
