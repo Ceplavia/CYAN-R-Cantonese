@@ -569,9 +569,7 @@ impl PunctuationKey {
         }
 }
 
-/// What a punctuation-key press resolves to — shared decision for the TSF
-/// (_HandlePunctuationKey) and IMM32 (process_punctuation) frontends so the
-/// two paths can never diverge.
+/// What a punctuation-key press resolves to.
 pub enum PunctAction {
         /// Not a punctuation key we handle — the caller passes it through.
         Pass,

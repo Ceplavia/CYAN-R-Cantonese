@@ -781,8 +781,8 @@ fn handle_punctuation_key(state: &mut ServiceState, ec: u32, context: &ITfContex
         let is_cantonese = thread_compartment(state, globals::GUID_COMPARTMENT_PUNCTUATION_FORM)
                 .get_bool()
                 .unwrap_or(true);
-        // Shared with the IMM32 path (punctuation::decide) — instant symbols
-        // commit directly, and "." after an ASCII digit stays half-width.
+        // punctuation::decide — instant symbols commit directly, and "."
+        // after an ASCII digit stays half-width.
         let action = crate::punctuation::decide(code, is_shifting, is_cantonese, prev_char_is_ascii_digit(ec, context));
         match action {
                 crate::punctuation::PunctAction::Pass => return Err(Error::from_hresult(E_INVALIDARG)),
@@ -1013,8 +1013,7 @@ fn handle_composition_character_form(state: &mut ServiceState, ec: u32, context:
 // A candidate-window menu toggled by Ctrl+`: digits select, Esc closes.
 // ---------------------------------------------------------------------
 
-/// Port of _BuildOptionsRows — rows come from the shared candview model so
-/// the IMM32 menu renders identically.
+/// Port of _BuildOptionsRows — rows come from the candview model.
 fn options_rows(processor: &std::sync::Arc<Mutex<Processor>>) -> Vec<CandidateItem> {
         let p = processor.lock().unwrap_or_else(|e| e.into_inner());
         crate::candview::options_rows(&p.settings)

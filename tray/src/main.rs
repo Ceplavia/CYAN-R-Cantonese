@@ -44,6 +44,7 @@ const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
 /// approach for HK users: cicero-unaware apps then get the 0x04040404
 /// dummy which hosts our TIP through the CTF bridge.
 const INPUT_TIP: &str = "0404:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+const INPUT_TIP_0C04: &str = "0C04:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
 
 // windows-link raw-dylib import — no import lib / GetProcAddress needed.
 windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flags: u32) -> BOOL);
@@ -88,6 +89,11 @@ fn ensure_hk_tip_entry() {
                         log_error("ensure_hk_tip_entry: key open failed");
                         return;
                 }
+                // Drop the stale 0C04 entry left by <=0.9.2 installs — the
+                // flyout would otherwise show two R-Cantonese entries under
+                // zh-HK, and the 0c04 path has no bridge dummy behind it.
+                let stale: Vec<u16> = INPUT_TIP_0C04.encode_utf16().chain(Some(0)).collect();
+                let _ = RegDeleteValueW(key, PCWSTR(stale.as_ptr()));
                 let name: Vec<u16> = INPUT_TIP.encode_utf16().chain(Some(0)).collect();
                 let mut exists = [0u8; 4];
                 let mut size = 4u32;

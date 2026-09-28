@@ -1,7 +1,6 @@
-// Shared candidate-window view — both transports render through this so
-// rows, fonts, colors, separators, preedit and numbering stay identical.
-// The TSF presenter (candidate.rs) and the IMM32 popup (ui.rs) only differ
-// in how the window is owned/positioned; the content is one code path.
+// Candidate-window view — rows, fonts, colors, separators, preedit and
+// numbering. The TSF presenter (candidate.rs) owns/positions the window;
+// the content lives here.
 
 use windows::core::w;
 use windows::Win32::Foundation::*;
@@ -340,8 +339,7 @@ pub fn options_rows(settings: &ImeSettings) -> Vec<Row> {
         ]
 }
 
-/// What a picked options row changes — each transport applies it its own
-/// way (TSF goes through Processor::set_*, IMM32 edits settings + saves).
+/// What a picked options row changes.
 pub enum OptionsChoice {
         Variant(CharacterVariant),
         Form(CharacterForm),

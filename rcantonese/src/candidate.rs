@@ -334,8 +334,7 @@ impl Drop for CandidateWindow {
         }
 }
 
-// Rendering goes through the shared candview module — the IMM32 popup
-// paints the same rows, fonts and colors.
+// Rendering goes through the shared candview module.
 
 fn measure_height(state: &CandidateWindowState, _page_size: usize) -> u32 {
         crate::candview::measure_height(
