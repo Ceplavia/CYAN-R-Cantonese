@@ -109,12 +109,10 @@ begin
     // Upgrades from <=0.9.2 left the dlls in {app}; they now live in
     // {sys}/{syswow64}. Delete the stale copies — regsvr32 re-points the
     // CLSID at the {sys} path, so a leftover {app} dll is dead weight.
-    // Loaded files can be renamed (not deleted) — move them aside.
+    // Still-mapped copies just stay until the next install/uninstall.
     AppDir := ExpandConstant('{app}');
-    if not DeleteFile(AppDir + '\r-cantonese.dll') then
-      RenameFile(AppDir + '\r-cantonese.dll', AppDir + '\r-cantonese-old.dll');
-    if not DeleteFile(AppDir + '\r-cantonese-x86.dll') then
-      RenameFile(AppDir + '\r-cantonese-x86.dll', AppDir + '\r-cantonese-x86-old.dll');
+    DeleteFile(AppDir + '\r-cantonese.dll');
+    DeleteFile(AppDir + '\r-cantonese-x86.dll');
   end;
   if CurStep = ssPostInstall then
   begin
