@@ -83,6 +83,12 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 
 **ImmIsIME 陷阱**：`0x04040404`/`0x04090c04`/`0x4090409` 全部都 `ImmIsIME=1`（bridge dummy — device-id 係 IME id）— 唔好當佢哋係 plain keyboard；`0x04040404` 先係 zh-TW 真·dummy。
 
+**IconFile 坑**（flyout/taskbar 圖標變 generic「繁體」tile）：
+- x86 regsvr32 後跑 → `RegisterProfile` 嘅 IconFile 俾佢 overwrite 做 `System32\r-cantonese-x86.dll`（WOW64 virtualized path — 檔案喺 SysWOW64 唔喺 System32）→ icon load 失敗
+- `RegisterProfile` 重複註冊返 `TF_E_ALREADY_EXISTS` → **IconFile/IconIndex 唔會更新** — `write_profile_icon` 直寫 registry（要 `KEY_WOW64_64KEY`，否則 x86 process 俾 redirect 去 `WOW6432Node`）
+- `module_file_name()` 個 buffer **帶 trailing NUL** — `String::from_utf16_lossy` 之後要 `trim_end_matches('\0')` 先可以做 `ends_with` 之類嘅字串比較
+- 升級路線：舊 IconFile 指 `{app}\r-cantonese.dll`，新裝置後個檔會俾 cleanup 刪埋 → 一定要重寫 IconFile（唔係凈係 rely on RegisterProfile）
+
 **HKCU CTF binding 係 login-time cache**：`Assemblies\*\KeyboardLayout`/`AssemblyItem`/`User Profile` 手寫咗要 sign out/in 先俾 ctfmon 讀 — reboot 之後仲會俾 Windows 跟 language association 重新 seed 返（逐次手改冇用，要改個 source：profiles/tips entries）。
 
 ### ✅ 後續修咗（2026-09-21）

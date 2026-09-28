@@ -5,6 +5,7 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::*;
@@ -107,6 +108,22 @@ pub fn register_profiles() -> bool {
                         globals::log_error("RegisterProfiles: GetModuleFileName failed");
                         return false;
                 };
+                // The x86 dll's registration overwrote IconFile with the
+                // virtualized "System32\r-cantonese-x86.dll" — a name that
+                // doesn't exist outside WOW64, so the profile icon fell back
+                // to a generic tile. IconFile must name the real x64 image.
+                let icon_text = String::from_utf16_lossy(&icon_file);
+                let icon_text = icon_text.trim_end_matches('\0');
+                let icon_file: Vec<u16> = if icon_text.to_lowercase().ends_with("\\r-cantonese-x86.dll") {
+                        let mut dir = [0u16; 260];
+                        let n = unsafe { GetWindowsDirectoryW(Some(&mut dir)) } as usize;
+                        format!("{}\\System32\\r-cantonese.dll", String::from_utf16_lossy(&dir[..n]))
+                                .encode_utf16()
+                                .chain(Some(0))
+                                .collect()
+                } else {
+                        icon_file
+                };
                 let icon_path: Vec<u16> = icon_file[..icon_file.len() - 1].to_vec();
 
                 let description = textservice_description();
@@ -138,6 +155,14 @@ pub fn register_profiles() -> bool {
                                 globals::log_error(&format!("RegisterProfiles: RegisterProfile {langid:#06x} failed: {code:?}"));
                                 return false;
                         }
+                        // RegisterProfile keeps the existing IconFile on
+                        // repeat registration (TF_E_ALREADY_EXISTS) — rewrite
+                        // it directly so upgrades pick up the new path.
+                        write_profile_icon(langid, &icon_file);
+                        globals::log_error(&format!(
+                                "RegisterProfiles: {langid:#06x} result ok, icon={}",
+                                String::from_utf16_lossy(&icon_file[..icon_file.len().saturating_sub(1)])
+                        ));
                 }
                 // InstallLayoutOrTip must run in the *user's* context — when
                 // called elevated (regsvr32 RunAs admin) it lands on the
@@ -149,6 +174,47 @@ pub fn register_profiles() -> bool {
                         install_layout_or_tip(false);
                 }
                 true
+        }
+}
+
+/// Rewrite IconFile/IconIndex on an existing profile — RegisterProfile skips
+/// them when the profile already exists, so upgrades would keep pointing at
+/// a stale dll path.
+fn write_profile_icon(langid: u16, icon_file: &[u16]) {
+        unsafe {
+                let path = format!(
+                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile\\{:#010x}\\{}",
+                        guid_to_string(&CLSID_RCANTONESE),
+                        langid,
+                        guid_to_string(&GUID_PROFILE)
+                );
+                let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+                let mut key = HKEY::default();
+                // TIP profiles live in the native 64-bit view — the x86
+                // registration run must not let WOW64 redirect us into
+                // WOW6432Node.
+                let create = RegCreateKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_READ | KEY_WRITE | KEY_WOW64_64KEY,
+                        None,
+                        &mut key,
+                        None,
+                );
+                if create != ERROR_SUCCESS {
+                        globals::log_error(&format!("write_profile_icon: RegCreateKeyExW failed {:?}", create));
+                        return;
+                }
+                let name: Vec<u16> = "IconFile".encode_utf16().chain(Some(0)).collect();
+                let bytes = std::slice::from_raw_parts(icon_file.as_ptr() as *const u8, icon_file.len() * 2);
+                let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_SZ, Some(bytes));
+                let name: Vec<u16> = "IconIndex".encode_utf16().chain(Some(0)).collect();
+                let index = (0i32 - globals::TEXTSERVICE_ICON_INDEX as i32) as u32;
+                let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&index.to_le_bytes()));
+                let _ = RegCloseKey(key);
         }
 }
 
