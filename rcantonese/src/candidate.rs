@@ -750,7 +750,10 @@ impl CandidateListPresenter {
                         let mut rect = RECT::default();
                         let mut clipped = BOOL(0);
                         if unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped) }.is_ok() {
-                                if rect.top == rect.bottom || rect.left == rect.right {
+                                // Weasel's CUAS test: zero *height* means a
+                                // cicero-unaware host. Width may legitimately
+                                // be zero — a collapsed caret has left==right.
+                                if rect.top == rect.bottom {
                                         self.bridge_detected.store(true, Ordering::Relaxed);
                                         return true;
                                 }
@@ -777,7 +780,7 @@ impl CandidateListPresenter {
                                 let mut rect = RECT::default();
                                 let mut clipped = BOOL(0);
                                 unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped)? };
-                                if rect.top == rect.bottom || rect.left == rect.right {
+                                if rect.top == rect.bottom {
                                         bridge_detected.store(true, Ordering::Relaxed);
                                         return Ok(());
                                 }

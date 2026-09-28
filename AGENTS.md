@@ -71,7 +71,9 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 2. **橋 dummy** — zh-Hant-HK tips entry 要係 `0404:{clsid}{guid}`（zh-TW langid → dummy `0x04040404`），唔係 `0C04:`（dummy `0x04090c04` — zh-HK 冇原生鍵盤，行唔到）。ILOT 唔可以 cross-language → tray `ensure_hk_tip_entry` 直接寫 `HKCU\Control Panel\International\User Profile\zh-Hant-HK` 嘅 DWORD tips entry。
 3. **`hklSubstitute` 係毒** — profile 有 substitute → ctf 當佢 IME-backed → legacy app 行 hkl 直達唔行 bridge → WoW revert 返 weasel。`RegisterProfile` 而家唔俾 substitute，兩個 langid（0x0c04 + 0x0404）都註。
 
-**Bridge 底下嘅候選窗**：WoW 自己讀 `CANDIDATELIST` 畫候選框 → 我哋自繪窗會雙重。檢測 = weasel 嘅 CUAS test：**`GetTextExt` 返 degenerate rect（`top==bottom`/`left==right`）→ cicero-unaware host** → `CandidateListPresenter.bridge_detected` → `show()`/`refresh_window` skip。Bridge 下 candidate data 照樣經 element 供俾 host — 遊戲自繪、普通 legacy app 由系統 `IME` 窗兜。`is_show_mode` 照常 set → 數字/space 揀字仲 work。
+**Bridge 底下嘅候選窗**：WoW 自己讀 `CANDIDATELIST` 畫候選框 → 我哋自繪窗會雙重。檢測 = weasel 嘅 CUAS test：**`GetTextExt` 返 `top==bottom`（零高）→ cicero-unaware host** → `CandidateListPresenter.bridge_detected` → `show()`/`refresh_window` skip。Bridge 下 candidate data 照樣經 element 供俾 host — 遊戲自繪、普通 legacy app 由系統 `IME` 窗兜。`is_show_mode` 照常 set → 數字/space 揀字仲 work。
+
+**只 check 零高，唔好 check `left==right`**：collapsed caret（淨係游標、冇選區）嘅 text-ext rect 合法零闊 — options menu（Ctrl+\`）就係錨喺 caret 上，check 闊度會將所有正常 app 誤判做 bridge 擋埋選單。Weasel `_SetCompositionPosition` 都淨係 `rc.top == rc.bottom`。
 
 **DB 路徑**：`default_database_path` 係 module-dir 優先 → `%ProgramFiles%\R-Cantonese` fallback — 因為 dll 依家喺 System32，但 db 喺 Program Files。
 
