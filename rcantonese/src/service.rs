@@ -460,7 +460,7 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
 
         fn OnTestKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
                 globals::guarded("OnTestKeyDown", || {
-                        globals::log_error(&format!("OnTestKeyDown vk={:#04x} pid={}", wparam.0, std::process::id()));
+                        globals::log(&format!("OnTestKeyDown vk={:#04x} pid={}", wparam.0, std::process::id()));
                         let Some(mut state) = self.try_lock() else { return Ok(BOOL(0)) };
                         let Some(context) = pic.as_ref() else { return Ok(BOOL(0)) };
                         let r = crate::keys::test_key(&mut state, context, wparam.0, lparam.0, true);

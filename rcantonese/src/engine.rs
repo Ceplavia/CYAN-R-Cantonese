@@ -1148,4 +1148,18 @@ mod debug_tests {
                 eprintln!("spell query rows: {}", rows.len());
                 for r in rows.iter().take(5) { eprintln!("  {} {}", r.word, r.romanization); }
         }
+
+        #[test]
+        fn imm3_trace() {
+                let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ime.sqlite3");
+                let engine = crate::engine::CoreImeEngine::prepare_path(&path).unwrap();
+                for input in ["im", "imm", "imm3", "imm32"] {
+                        let keys: Vec<_> = input.chars().filter_map(crate::types::VirtualInputKey::for_character).collect();
+                        eprintln!("{input:?}: keys={:?}", keys.iter().map(|k| k.character).collect::<Vec<_>>());
+                        let seg = engine.segment(&keys);
+                        let sug = engine.suggest(&keys, &seg, true);
+                        let texts: Vec<_> = sug.iter().take(10).map(|l| format!("{}({})", l.text, l.romanization)).collect();
+                        eprintln!("  -> {texts:?}");
+                }
+        }
 }

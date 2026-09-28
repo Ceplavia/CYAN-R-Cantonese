@@ -255,6 +255,14 @@ pub fn test_key(
                 {
                         return Some((key_state, code, wch));
                 }
+        } else if key_state.category == KeystrokeCategory::InvokeCompositionEditSession {
+                // Unhandled printable key while a composition is open — the
+                // app must not receive it inside the live composition range
+                // (the insert lands at a scrambled offset, e.g. "imm"+3+2
+                // coming out as "2imm3"). Eat it here: the handler finalizes
+                // the composition first, then emits the char itself.
+                globals::log(&format!("test_key: eat-for-finalize code={code:#04x} wch={wch:#06x}"));
+                return Some((key_state, code, wch));
         }
         if should_handle_punctuation {
                 return Some((
@@ -373,6 +381,26 @@ fn key_state_handler(
                 }
                 (C::Composing, F::FinalizeCandidateList) => handle_composition_finalize(state, ec, context, true),
                 (C::Composing, F::Convert) => handle_composition_convert(state, ec, context),
+                (C::InvokeCompositionEditSession, F::FinalizeTextStore)
+                | (C::InvokeCompositionEditSession, F::FinalizeTextstoreAndInput) => {
+                        // Unhandled printable key while composing — commit the
+                        // composition first, then emit the char. Without this
+                        // the app receives the char inside the live
+                        // composition range and the text scrambles
+                        // (e.g. "imm"+3+2 came out "2imm3").
+                        if state.is_composing() {
+                                handle_composition_finalize_raw(state, ec, context)?;
+                        }
+                        if wch != 0 {
+                                let full = (0x20u16..=0x7e).contains(&wch)
+                                        && thread_compartment(state, globals::GUID_COMPARTMENT_CHARACTER_FORM)
+                                                .get_bool()
+                                                .unwrap_or(false);
+                                let ch = if full && wch == 0x20 { 0x3000u16 } else if full { wch + 0xFEE0 } else { wch };
+                                composition::add_char_and_finalize(ec, context, &[ch])?;
+                        }
+                        Ok(())
+                }
                 (C::Composing, F::Cancel) => handle_cancel(state, ec, context),
                 (C::Composing, F::Backspace) => handle_composition_backspace(state, ec, context),
                 (C::Composing, f) if is_arrow_function(f) => handle_composition_arrow_key(state, ec, context, f),
