@@ -75,7 +75,7 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 
 **只 check 零高，唔好 check `left==right`**：collapsed caret（淨係游標、冇選區）嘅 text-ext rect 合法零闊 — options menu（Ctrl+\`）就係錨喺 caret 上，check 闊度會將所有正常 app 誤判做 bridge 擋埋選單。Weasel `_SetCompositionPosition` 都淨係 `rc.top == rc.bottom`。
 
-**DB 路徑**：`default_database_path` 係 module-dir 優先 → `%ProgramFiles%\R-Cantonese` fallback — 因為 dll 依家喺 System32，但 db 喺 Program Files。
+**DB/exe 路徑**：`installed_file_path(name)` 係 module-dir 優先 → `%ProgramW6432%\R-Cantonese` fallback — 因為 dll 依家喺 System32，但 db/tray/config-center 喺 Program Files。**WOW64 陷阱**：32-bit process 嘅 `ProgramFiles` = `Program Files (x86)` — 要用 `ProgramW6432`（淨 WOW64 process 有）先攞到真·64-bit 目錄，否則 x86 app（企業微信類）db/tray/config-center 全部 404。
 
 **安裝/卸載規則**（dll 要喺 System32 — WoW 類 app 淨俾 system dir load，其它程序遲早都有同樣限制）：
 - 新裝：`r-cantonese.dll` → `{sys}`、`r-cantonese-x86.dll` → `{syswow64}`；**regsvr32 註嘅係 System32 嗰個**（註冊路徑 = load 路徑）
