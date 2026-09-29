@@ -116,7 +116,7 @@ pub fn register_profiles() -> bool {
                 let icon_text = icon_text.trim_end_matches('\0');
                 let icon_file: Vec<u16> = if icon_text.to_lowercase().ends_with("\\r-cantonese-x86.dll") {
                         let mut dir = [0u16; 260];
-                        let n = unsafe { GetWindowsDirectoryW(Some(&mut dir)) } as usize;
+                        let n = GetWindowsDirectoryW(Some(&mut dir)) as usize;
                         format!("{}\\System32\\r-cantonese.dll", String::from_utf16_lossy(&dir[..n]))
                                 .encode_utf16()
                                 .chain(Some(0))

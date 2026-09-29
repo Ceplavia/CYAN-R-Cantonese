@@ -162,7 +162,10 @@ pub fn installed_file_path(file_name: &str) -> Option<std::path::PathBuf> {
                         return Some(beside);
                 }
         }
-        std::env::var_os("ProgramFiles")
+        // WOW64: in a 32-bit host `ProgramFiles` is "C:\Program Files (x86)"
+        // — the real 64-bit dir is exposed as ProgramW6432.
+        let program_files = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"));
+        program_files
                 .map(|dir| std::path::PathBuf::from(dir).join("R-Cantonese").join(file_name))
                 .filter(|p| p.exists())
 }

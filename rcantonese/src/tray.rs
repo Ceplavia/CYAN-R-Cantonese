@@ -18,7 +18,7 @@ use std::sync::{Mutex, Weak};
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
-use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::TextServices::{CLSID_TF_ThreadMgr, ITfThreadMgr};
 use windows::Win32::UI::WindowsAndMessaging::*;
