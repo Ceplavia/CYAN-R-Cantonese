@@ -17,3 +17,9 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+
+# Local-only helpers — deploy/test scripts and the Inno script are
+# machine-specific, not project sources
+dev-reload.cmd
+revert-ime-test.cmd
+installer.iss
