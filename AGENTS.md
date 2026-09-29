@@ -100,7 +100,7 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 - **Install 後舊 dll 仲行緊**：`restartreplace` 排 `PendingFileRenameOperations` — 要 reboot 先換（或者 per-user shadow 繞過）。
 
 ## Workflow
-- **唔好主動 `git push`** — commit 照做，push 等用戶明確指示（減少 GitHub history 噪音）
+- **絕對唔准自動 `git push`** — push 係遙控動作，必須用戶喺嗰次明確話「push」先至准做。「commit+push」嘅指示**只適用嗰一次**，唔係常設授權 — 之後每個新 commit 都要重新等指示先 push。之前曾經因為習慣性順手 push 被指正過，唔好再犯。commit 照做（本地），push 永遠等人開聲。
 
 ## 已知問題（2026-09-19 記錄）
 
