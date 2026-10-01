@@ -905,9 +905,8 @@ fn sweep_tip_entries_except(langid: u16) {
                                 let name = String::from_utf16_lossy(&nbuf[..nlen as usize]);
                                 if name.to_uppercase().ends_with(TIP_SUFFIX) {
                                         doomed.push(name);
-                                } else {
-                                        j += 1;
                                 }
+                                j += 1;
                         }
                         for name in doomed {
                                 let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();

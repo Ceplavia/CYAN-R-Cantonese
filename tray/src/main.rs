@@ -213,9 +213,8 @@ fn sweep_tips_in(hive: HKEY, root: &str, keep: Option<&str>) {
                                 let name = String::from_utf16_lossy(&nbuf[..nlen as usize]);
                                 if name.to_uppercase().ends_with(SUFFIX) {
                                         doomed.push(name);
-                                } else {
-                                        j += 1;
                                 }
+                                j += 1;
                         }
                         for name in doomed {
                                 let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
@@ -272,9 +271,8 @@ fn clean_dead_preloads(hive: HKEY, path: &str) {
                                 && data.to_lowercase().ends_with("0c04")
                         {
                                 doomed.push(name);
-                        } else {
-                                i += 1;
                         }
+                        i += 1;
                 }
                 for name in doomed {
                         let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
