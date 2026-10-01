@@ -105,7 +105,26 @@ fn cleanup_residue(system: bool) {
                 clean_dead_preloads(HKEY_USERS, ".DEFAULT\\Keyboard Layout\\Preload");
                 clean_assembly_item_dups(HKEY_USERS, ".DEFAULT\\Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
         } else {
-                ensure_input_tip();
+                // Registry-only reconcile — skip the InstallLayoutOrTip
+                // language force-add (it can spawn a hidden system dialog
+                // when invoked from a spawned process). ensure_input_tip
+                // covers it on the normal tray path.
+                use windows::Win32::System::Registry::*;
+                let keep = if profile_registered(0x0c04) {
+                        ensure_hk_tip_entry();
+                        Some("zh-hant-hk")
+                } else if profile_registered(0x0804) {
+                        Some("zh-hans-cn")
+                } else if profile_registered(0x0404) {
+                        Some("zh-hant-tw")
+                } else {
+                        None
+                };
+                if let Some(keep) = keep {
+                        sweep_tips_in(HKEY_CURRENT_USER, "Control Panel\\International\\User Profile", Some(keep));
+                }
+                clean_dead_preloads(HKEY_CURRENT_USER, "Keyboard Layout\\Preload");
+                clean_assembly_item_dups(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
         }
 }
 
