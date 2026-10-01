@@ -196,17 +196,9 @@ fn install_locale(langid: u16) -> Result<(), String> {
                         0,
                 )
                 .map_err(|e| format!("{:?}", e.code()))?;
-                // RegisterProfile only registers — ActivateProfile puts the
-                // profile into the layout list so it can actually be selected.
-                mgr.ActivateProfile(
-                        TF_PROFILETYPE_INPUTPROCESSOR,
-                        langid,
-                        &CLSID_RCANTONESE,
-                        &GUID_PROFILE,
-                        windows::Win32::UI::Input::KeyboardAndMouse::HKL::default(),
-                        0,
-                )
-                .map_err(|e| format!("activate 失敗：{:?}", e.code()))?;
+                // ActivateProfile is for keyboard-layout profiles — calling it
+                // on a TIP fails E_INVALIDARG while the tips entry alone already
+                // surfaces the IME. Skip it entirely.
                 // zh-HK keeps the 0404 bridge profile beside its own —
                 // DllRegisterServer registers both; switching locale must not
                 // drop the bridge or cicero-unaware apps lose the IME.
@@ -826,7 +818,7 @@ fn install_tip_for_user(langid: u16) -> Result<(), String> {
                 }
         }
         unsafe {
-                // If the language itself isn't in the user's profile list yet,
+                // If the language itself isn't in the user's language list yet,
                 // install its stock keyboard to force it in — our tip then
                 // attaches under it (only on machines lacking the language).
                 if !user_has_language(langid) {
@@ -835,7 +827,82 @@ fn install_tip_for_user(langid: u16) -> Result<(), String> {
                         let _ = InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0);
                 }
         }
+        sweep_tip_entries_except(langid);
         Ok(())
+}
+
+/// Remove our tips entries (`{langid}:{clsid}{guid}` DWORDs) from every
+/// `User Profile\<lang>` key except the one for `langid` — otherwise each
+/// locale switch leaves a R-Cantonese entry behind in the picker.
+fn sweep_tip_entries_except(langid: u16) {
+        use windows::Win32::System::Registry::*;
+        use windows::core::PWSTR;
+        let keep = match langid {
+                0x0c04 => "zh-hant-hk",
+                0x0804 => "zh-hans-cn",
+                0x0404 => "zh-hant-tw",
+                _ => return,
+        };
+        const TIP_SUFFIX: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+        unsafe {
+                let root_wide: Vec<u16> = "Control Panel\\International\\User Profile"
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                let mut root = HKEY::default();
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(root_wide.as_ptr()), Some(0), KEY_READ, &mut root) != ERROR_SUCCESS {
+                        return;
+                }
+                let mut i = 0u32;
+                let mut langs = Vec::new();
+                loop {
+                        let mut buf = [0u16; 128];
+                        let mut len = buf.len() as u32;
+                        if RegEnumKeyExW(root, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                != ERROR_SUCCESS
+                        {
+                                break;
+                        }
+                        langs.push(String::from_utf16_lossy(&buf[..len as usize]));
+                        i += 1;
+                }
+                let _ = RegCloseKey(root);
+                for lang in langs {
+                        if lang.eq_ignore_ascii_case(keep) {
+                                continue;
+                        }
+                        let path = format!("Control Panel\\International\\User Profile\\{lang}\0");
+                        let wide: Vec<u16> = path.encode_utf16().collect();
+                        let mut sub = HKEY::default();
+                        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut sub)
+                                != ERROR_SUCCESS
+                        {
+                                continue;
+                        }
+                        let mut j = 0u32;
+                        let mut doomed = Vec::new();
+                        loop {
+                                let mut nbuf = [0u16; 256];
+                                let mut nlen = nbuf.len() as u32;
+                                if RegEnumValueW(sub, j, Some(PWSTR(nbuf.as_mut_ptr())), &mut nlen, None, None, None, None)
+                                        != ERROR_SUCCESS
+                                {
+                                        break;
+                                }
+                                let name = String::from_utf16_lossy(&nbuf[..nlen as usize]);
+                                if name.to_uppercase().ends_with(TIP_SUFFIX) {
+                                        doomed.push(name);
+                                } else {
+                                        j += 1;
+                                }
+                        }
+                        for name in doomed {
+                                let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+                                let _ = RegDeleteValueW(sub, PCWSTR(w.as_ptr()));
+                        }
+                        let _ = RegCloseKey(sub);
+                }
+        }
 }
 
 /// Mirror of the tray's ensure_hk_tip_entry — write `0404:{clsid}{guid}`

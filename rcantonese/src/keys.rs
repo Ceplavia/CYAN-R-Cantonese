@@ -53,23 +53,23 @@ static CAPS_WAS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 fn convert_virtual_key(wparam: usize, lparam: isize) -> (u32, u16) {
         let code = wparam as u32;
         if code == crate::keytable::VK_PACKET {
-                let scancode = ((lparam as u32) & 0x00FF0000) >> 16;
-                let mut buf = [0u16; 4];
-                let keyboard = [0u8; 256];
-                unsafe {
-                        let count = ToUnicode(code, scancode, Some(&keyboard), &mut buf, 0);
-                        if count > 0 {
-                                return (code, buf[0]);
-                        }
-                        let count = ToUnicode(code, scancode, Some(&keyboard), &mut buf, 4);
-                        if count > 0 {
-                                return (code, buf[0]);
-                        }
-                }
-                (code, 0)
-        } else {
-                (code, code as u16)
+                // VK_PACKET carries the character in lParam's low word.
+                return (code, (lparam as u32 & 0xFFFF) as u16);
         }
+        // Translate every key — ToUnicode returns 0 for modifiers and other
+        // non-character keys, which is what marks a key as "printable" for
+        // the finalize-before-passthrough logic. Flag 4 keeps it from
+        // mutating keyboard state (dead-key chains etc).
+        let scancode = ((lparam as u32) & 0x00FF0000) >> 16;
+        let mut buf = [0u16; 4];
+        let keyboard = [0u8; 256];
+        unsafe {
+                let count = ToUnicode(code, scancode, Some(&keyboard), &mut buf, 4);
+                if count > 0 {
+                        return (code, buf[0]);
+                }
+        }
+        (code, 0)
 }
 
 /// Port of _TestKeyDown — returns Some(state, code, wch) when the key will be eaten.

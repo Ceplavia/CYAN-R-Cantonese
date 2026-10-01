@@ -77,6 +77,12 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 
 **DB/exe 路徑**：`installed_file_path(name)` 係 module-dir 優先 → `%ProgramW6432%\R-Cantonese` fallback — 因為 dll 依家喺 System32，但 db/tray/config-center 喺 Program Files。**WOW64 陷阱**：32-bit process 嘅 `ProgramFiles` = `Program Files (x86)` — 要用 `ProgramW6432`（淨 WOW64 process 有）先攞到真·64-bit 目錄，否則 x86 app（企業微信類）db/tray/config-center 全部 404。
 
+**`convert_virtual_key` 嘅 wch 必須係真·字符**：唔好將 vk code 當 char 用（`wch = code`）— modifier/功能鍵會有非零 wch，`has_active_input && wch != 0` 嘅 finalize-before-passthrough 會誤殺（Ctrl 一撳就 commit+收窗，Ctrl+Shift+Del forget 失效）。而家全部鍵行 `ToUnicode(flag=4)` — 唔郁 keyboard state，modifier 返 0。嗰個 check 仲要擋 Ctrl/Alt 掣住嘅 chord（Ctrl+C 唔應該 commit+emit 'c'）。
+
+**ActivateProfile 唔係俾 TIP 用**：`ActivateProfile` 會 E_INVALIDARG（佢係 keyboard-layout profile 嘅 API）— `RegisterProfile(bEnableByDefault=1)` + tips entry 已經夠。之前每個 locale 轉換會彈「activate 失敗」但其實裝到，就係呢個原因。
+
+**tips entry 累積**：`User Profile\<lang>` 每個語言 key 各自裝 `*:{clsid}{guid}` DWORD — config-center `sweep_tip_entries_except` 裝完會清走其它語言嘅我哋 entry（唔會每個 locale 留一個殘留）；tray `ensure_input_tip` 跟 `profile_registered()` 決定邊個 lang key 係 active — zh-HK 裝咗先有 0x0c04 profile（0404 只係 bridge host），切咗 zh-CN/zh-TW 之後唔好再寫 zh-Hant-HK entry。
+
 **安裝/卸載規則**（dll 要喺 System32 — WoW 類 app 淨俾 system dir load，其它程序遲早都有同樣限制）：
 - 新裝：`r-cantonese.dll` → `{sys}`、`r-cantonese-x86.dll` → `{syswow64}`；**regsvr32 註嘅係 System32 嗰個**（註冊路徑 = load 路徑）
 - 升級 0.9.2 → 0.9.3：舊版 dll 喺 `{app}` — installer `ssInstall` 會先刪/搬埋佢（loaded file rename 得），CLSID 轉指 `{sys}` 嗰個

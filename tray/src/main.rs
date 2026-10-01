@@ -54,22 +54,139 @@ windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flag
 /// the tray runs as the logged-in user at every login anyway.
 fn ensure_input_tip() {
         unsafe {
-                // ILOT lands on zh-TW's own tips list (the tip's langid
-                // selects the language), not zh-Hant-HK — write the entry
-                // directly into zh-Hant-HK's User Profile key instead: a
-                // DWORD whose name is the tip string and whose value is the
-                // sort order (next free index).
-                ensure_hk_tip_entry();
-                // If zh-HK itself isn't in the user's language list the tip has
-                // nowhere to attach (seen on zh-CN-only systems). Installing the
-                // zh-HK "US" keyboard forces the language into the list; our tip
-                // then sits beside it. Cost: a spare "US" keyboard under zh-HK
-                // in Settings — only on machines that lacked the language.
-                if !user_has_language() {
-                        let kb: Vec<u16> = "0C04:00000409".encode_utf16().chain(Some(0)).collect();
-                        if !InstallLayoutOrTip(PCWSTR(kb.as_ptr()), 0).as_bool() {
-                                log_error("InstallLayoutOrTip failed (zh-HK language)");
+                // The config center's locale switch decides which profile is
+                // registered. Only the zh-HK install keeps the 0x0c04 profile —
+                // gate the zh-Hant-HK tips entry on it so switching to zh-CN /
+                // zh-TW doesn't leave a stray zh-HK entry we re-add each login.
+                let hk_active = profile_registered(0x0c04);
+                if hk_active {
+                        ensure_hk_tip_entry();
+                        // If zh-HK itself isn't in the user's language list the tip has
+                        // nowhere to attach (seen on zh-CN-only systems). Installing the
+                        // zh-HK "US" keyboard forces the language into the list; our tip
+                        // then sits beside it. Cost: a spare "US" keyboard under zh-HK
+                        // in Settings — only on machines that lacked the language.
+                        if !user_has_language() {
+                                let kb: Vec<u16> = "0C04:00000409".encode_utf16().chain(Some(0)).collect();
+                                if !InstallLayoutOrTip(PCWSTR(kb.as_ptr()), 0).as_bool() {
+                                        log_error("InstallLayoutOrTip failed (zh-HK language)");
+                                }
                         }
+                }
+                // Drop our tips entries under languages that aren't the active
+                // locale — config-center sweeps at switch time, this keeps it
+                // consistent for machines that already accumulated them.
+                let keep = if hk_active {
+                        Some("zh-hant-hk")
+                } else if profile_registered(0x0804) {
+                        Some("zh-hans-cn")
+                } else if profile_registered(0x0404) {
+                        Some("zh-hant-tw")
+                } else {
+                        None
+                };
+                if let Some(keep) = keep {
+                        sweep_tip_entries_except(keep);
+                }
+        }
+}
+
+/// Whether `HKLM\SOFTWARE\Microsoft\CTF\TIP\{clsid}\LanguageProfile\0x0000{langid}`
+/// exists — the config-center locale switch registers exactly the active locale's
+/// profile (zh-HK additionally keeps 0x0404 as the bridge dummy's host).
+fn profile_registered(langid: u16) -> bool {
+        use windows::Win32::System::Registry::*;
+        unsafe {
+                let path = format!(
+                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}\\LanguageProfile\\{langid:#010x}\0"
+                );
+                let wide: Vec<u16> = path.encode_utf16().collect();
+                let mut key = HKEY::default();
+                let ok = RegOpenKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        KEY_READ | KEY_WOW64_64KEY,
+                        &mut key,
+                ) == ERROR_SUCCESS;
+                if ok {
+                        let _ = RegCloseKey(key);
+                }
+                ok
+        }
+}
+
+/// Delete `*:{clsid}{guid}` DWORDs from every `User Profile\<lang>` key
+/// except `keep` — entries under other languages surface as extra
+/// R-Cantonese rows in the language picker.
+fn sweep_tip_entries_except(keep: &str) {
+        use windows::Win32::System::Registry::*;
+        use windows::core::PWSTR;
+        const SUFFIX: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+        unsafe {
+                let root_wide: Vec<u16> = "Control Panel\\International\\User Profile"
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
+                let mut root = HKEY::default();
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(root_wide.as_ptr()), Some(0), KEY_READ, &mut root)
+                        != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let mut langs = Vec::new();
+                let mut i = 0u32;
+                loop {
+                        let mut buf = [0u16; 128];
+                        let mut len = buf.len() as u32;
+                        if RegEnumKeyExW(root, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                != ERROR_SUCCESS
+                        {
+                                break;
+                        }
+                        langs.push(String::from_utf16_lossy(&buf[..len as usize]));
+                        i += 1;
+                }
+                let _ = RegCloseKey(root);
+                for lang in langs {
+                        if lang.eq_ignore_ascii_case(keep) {
+                                continue;
+                        }
+                        let path = format!("Control Panel\\International\\User Profile\\{lang}\0");
+                        let wide: Vec<u16> = path.encode_utf16().collect();
+                        let mut sub = HKEY::default();
+                        if RegOpenKeyExW(
+                                HKEY_CURRENT_USER,
+                                PCWSTR(wide.as_ptr()),
+                                Some(0),
+                                KEY_READ | KEY_SET_VALUE,
+                                &mut sub,
+                        ) != ERROR_SUCCESS
+                        {
+                                continue;
+                        }
+                        let mut doomed = Vec::new();
+                        let mut j = 0u32;
+                        loop {
+                                let mut nbuf = [0u16; 256];
+                                let mut nlen = nbuf.len() as u32;
+                                if RegEnumValueW(sub, j, Some(PWSTR(nbuf.as_mut_ptr())), &mut nlen, None, None, None, None)
+                                        != ERROR_SUCCESS
+                                {
+                                        break;
+                                }
+                                let name = String::from_utf16_lossy(&nbuf[..nlen as usize]);
+                                if name.to_uppercase().ends_with(SUFFIX) {
+                                        doomed.push(name);
+                                } else {
+                                        j += 1;
+                                }
+                        }
+                        for name in doomed {
+                                let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                                let _ = RegDeleteValueW(sub, PCWSTR(w.as_ptr()));
+                        }
+                        let _ = RegCloseKey(sub);
                 }
         }
 }

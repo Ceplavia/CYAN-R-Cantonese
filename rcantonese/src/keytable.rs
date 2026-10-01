@@ -489,7 +489,11 @@ impl KeystrokeEngine {
                 }
 
                 let has_active_input = composing || candidate_mode != CandidateMode::None;
-                if has_active_input && wch != 0 && !self.is_virtual_key_keystroke_composition(code, state, KeystrokeFunction::None) {
+                // Ctrl/Alt chords are app shortcuts, not text input — passing
+                // them through must not commit the composition. (Ctrl+Shift+Del
+                // is our own ForgetCandidate and never reaches this point.)
+                let ctrl_alt_held = globals::modifiers_value() & (globals::TF_MOD_ALLCONTROL | globals::TF_MOD_ALLALT) != 0;
+                if has_active_input && wch != 0 && !ctrl_alt_held && !self.is_virtual_key_keystroke_composition(code, state, KeystrokeFunction::None) {
                         state.category = KeystrokeCategory::InvokeCompositionEditSession;
                         state.function = KeystrokeFunction::FinalizeTextStore;
                         return false;
