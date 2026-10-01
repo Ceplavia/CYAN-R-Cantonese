@@ -282,71 +282,203 @@ fn clean_dead_preloads(hive: HKEY, path: &str) {
         }
 }
 
-/// `SortOrder\AssemblyItem\<lang>\<item-guid>` subkeys carry CLSID/Profile —
-/// keep the first subkey naming our CLSID, delete duplicates.
+/// `SortOrder\AssemblyItem\<langid>\<item-guid>\<order>` leaves carry
+/// CLSID/Profile — enabling a tips DWORD creates one; deleting the DWORD
+/// later leaves the leaf behind as an orphan flyout row. For our CLSID a leaf
+/// is legit only while a `{langid}:{clsid}{guid}` DWORD exists under that
+/// hive's `User Profile\<lang>`; otherwise (and for dups) delete it.
 fn clean_assembly_item_dups(hive: HKEY, root: &str) {
         use windows::Win32::System::Registry::*;
         use windows::core::PWSTR;
         const OURS: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}";
+        const OUR_TIP: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
         unsafe {
-                for lang in ["0x00000404", "0x00000c04", "0x00000804"] {
-                        let path = format!("{root}\\{lang}\0");
-                        let wide: Vec<u16> = path.encode_utf16().collect();
-                        let mut key = HKEY::default();
-                        if RegOpenKeyExW(hive, PCWSTR(wide.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut key)
-                                != ERROR_SUCCESS
-                        {
-                                continue;
-                        }
-                        let mut seen = false;
-                        let mut doomed = Vec::new();
+                // Langids that still have a live tips DWORD naming our tip —
+                // the DWORD prefix (e.g. "0404") selects the profile's langid.
+                let tips_root = if hive == HKEY_USERS {
+                        ".DEFAULT\\Control Panel\\International\\User Profile"
+                } else {
+                        "Control Panel\\International\\User Profile"
+                };
+                let mut active_langs = std::collections::HashSet::new();
+                let tr_wide: Vec<u16> = tips_root.encode_utf16().chain(Some(0)).collect();
+                let mut tips_key = HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(tr_wide.as_ptr()), Some(0), KEY_READ, &mut tips_key)
+                        == ERROR_SUCCESS
+                {
+                        let mut langs = Vec::new();
                         let mut i = 0u32;
                         loop {
                                 let mut buf = [0u16; 128];
                                 let mut len = buf.len() as u32;
-                                if RegEnumKeyExW(key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                if RegEnumKeyExW(tips_key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
                                         != ERROR_SUCCESS
                                 {
                                         break;
                                 }
-                                let sub = String::from_utf16_lossy(&buf[..len as usize]);
+                                langs.push(String::from_utf16_lossy(&buf[..len as usize]));
                                 i += 1;
-                                let sub_path = format!("{root}\\{lang}\\{sub}\0");
-                                let swide: Vec<u16> = sub_path.encode_utf16().collect();
-                                let mut skey = HKEY::default();
-                                if RegOpenKeyExW(hive, PCWSTR(swide.as_ptr()), Some(0), KEY_READ, &mut skey)
+                        }
+                        let _ = RegCloseKey(tips_key);
+                        for lang in langs {
+                                let p = format!("{tips_root}\\{lang}\0");
+                                let pw: Vec<u16> = p.encode_utf16().collect();
+                                let mut lang_key = HKEY::default();
+                                if RegOpenKeyExW(hive, PCWSTR(pw.as_ptr()), Some(0), KEY_READ, &mut lang_key)
                                         != ERROR_SUCCESS
                                 {
                                         continue;
                                 }
-                                let mut vbuf = [0u16; 64];
-                                let mut vlen = (vbuf.len() * 2) as u32;
-                                let vname: Vec<u16> = "CLSID".encode_utf16().chain(Some(0)).collect();
-                                let ok = RegQueryValueExW(
-                                        skey,
-                                        PCWSTR(vname.as_ptr()),
-                                        None,
-                                        None,
-                                        Some(vbuf.as_mut_ptr() as *mut u8),
-                                        Some(&mut vlen),
-                                ) == ERROR_SUCCESS;
-                                let _ = RegCloseKey(skey);
-                                if ok {
-                                        let text = String::from_utf16_lossy(&vbuf[..(vlen as usize / 2).saturating_sub(1)]);
-                                        if text.eq_ignore_ascii_case(OURS) {
-                                                if seen {
-                                                        doomed.push(sub);
-                                                } else {
-                                                        seen = true;
+                                let mut j = 0u32;
+                                loop {
+                                        let mut nb = [0u16; 256];
+                                        let mut nl = nb.len() as u32;
+                                        if RegEnumValueW(lang_key, j, Some(PWSTR(nb.as_mut_ptr())), &mut nl, None, None, None, None)
+                                                != ERROR_SUCCESS
+                                        {
+                                                break;
+                                        }
+                                        j += 1;
+                                        let name = String::from_utf16_lossy(&nb[..nl as usize]);
+                                        if name.to_uppercase().ends_with(OUR_TIP) {
+                                                if let Some(hex) = name.split(':').next() {
+                                                        if let Ok(langid) = u32::from_str_radix(hex, 16) {
+                                                                active_langs.insert(langid);
+                                                        }
                                                 }
                                         }
                                 }
+                                let _ = RegCloseKey(lang_key);
                         }
-                        for name in doomed {
-                                let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-                                let _ = RegDeleteTreeW(key, PCWSTR(w.as_ptr()));
+                }
+
+                // Enumerate AssemblyItem\<langid>\<item>\<order>; drop leaves
+                // whose langid has no live tips DWORD, dedupe the rest.
+                let asm_wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+                let mut asm_key = HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(asm_wide.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut asm_key)
+                        != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let mut lang_roots = Vec::new();
+                let mut i = 0u32;
+                loop {
+                        let mut buf = [0u16; 32];
+                        let mut len = buf.len() as u32;
+                        if RegEnumKeyExW(asm_key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                != ERROR_SUCCESS
+                        {
+                                break;
                         }
-                        let _ = RegCloseKey(key);
+                        lang_roots.push(String::from_utf16_lossy(&buf[..len as usize]));
+                        i += 1;
+                }
+                let _ = RegCloseKey(asm_key);
+                for lang_root in lang_roots {
+                        let Some(langid) = lang_root
+                                .strip_prefix("0x")
+                                .or_else(|| lang_root.strip_prefix("0X"))
+                                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                        else {
+                                continue;
+                        };
+                        let lang_active = active_langs.contains(&langid);
+                        let lang_path = format!("{root}\\{lang_root}\0");
+                        let lw: Vec<u16> = lang_path.encode_utf16().collect();
+                        let mut lang_key = HKEY::default();
+                        if RegOpenKeyExW(hive, PCWSTR(lw.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut lang_key)
+                                != ERROR_SUCCESS
+                        {
+                                continue;
+                        }
+                        let mut items = Vec::new();
+                        let mut i = 0u32;
+                        loop {
+                                let mut buf = [0u16; 128];
+                                let mut len = buf.len() as u32;
+                                if RegEnumKeyExW(lang_key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                        != ERROR_SUCCESS
+                                {
+                                        break;
+                                }
+                                items.push(String::from_utf16_lossy(&buf[..len as usize]));
+                                i += 1;
+                        }
+                        let mut seen = false;
+                        let mut doomed: Vec<(String, String)> = Vec::new();
+                        for item in items {
+                                // Each <item> is a shared container — sibling
+                                // <order> leaves may belong to other IMEs.
+                                // Delete only OUR leaves, never the item key.
+                                let item_path = format!("{root}\\{lang_root}\\{item}\0");
+                                let iw: Vec<u16> = item_path.encode_utf16().collect();
+                                let mut item_key = HKEY::default();
+                                if RegOpenKeyExW(hive, PCWSTR(iw.as_ptr()), Some(0), KEY_READ, &mut item_key)
+                                        != ERROR_SUCCESS
+                                {
+                                        continue;
+                                }
+                                let mut j = 0u32;
+                                let mut item_orders = Vec::new();
+                                loop {
+                                        let mut buf = [0u16; 32];
+                                        let mut len = buf.len() as u32;
+                                        if RegEnumKeyExW(item_key, j, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                                != ERROR_SUCCESS
+                                        {
+                                                break;
+                                        }
+                                        item_orders.push(String::from_utf16_lossy(&buf[..len as usize]));
+                                        j += 1;
+                                }
+                                for order in item_orders {
+                                        let op = format!("{root}\\{lang_root}\\{item}\\{order}\0");
+                                        let ow: Vec<u16> = op.encode_utf16().collect();
+                                        let mut okey = HKEY::default();
+                                        if RegOpenKeyExW(hive, PCWSTR(ow.as_ptr()), Some(0), KEY_READ, &mut okey)
+                                                != ERROR_SUCCESS
+                                        {
+                                                continue;
+                                        }
+                                        let mut vbuf = [0u16; 64];
+                                        let mut vlen = (vbuf.len() * 2) as u32;
+                                        let vname: Vec<u16> = "CLSID".encode_utf16().chain(Some(0)).collect();
+                                        let ok = RegQueryValueExW(
+                                                okey,
+                                                PCWSTR(vname.as_ptr()),
+                                                None,
+                                                None,
+                                                Some(vbuf.as_mut_ptr() as *mut u8),
+                                                Some(&mut vlen),
+                                        ) == ERROR_SUCCESS;
+                                        let _ = RegCloseKey(okey);
+                                        if ok {
+                                                let text = String::from_utf16_lossy(&vbuf[..(vlen as usize / 2).saturating_sub(1)]);
+                                                if text.eq_ignore_ascii_case(OURS) {
+                                                        if !lang_active || seen {
+                                                                doomed.push((item.clone(), order));
+                                                        } else {
+                                                                seen = true;
+                                                        }
+                                                }
+                                        }
+                                }
+                                let _ = RegCloseKey(item_key);
+                        }
+                        for (item, order) in doomed {
+                                let ip = format!("{root}\\{lang_root}\\{item}\0");
+                                let iw: Vec<u16> = ip.encode_utf16().collect();
+                                let mut ik = HKEY::default();
+                                if RegOpenKeyExW(hive, PCWSTR(iw.as_ptr()), Some(0), KEY_ALL_ACCESS, &mut ik)
+                                        == ERROR_SUCCESS
+                                {
+                                        let w: Vec<u16> = order.encode_utf16().chain(Some(0)).collect();
+                                        let _ = RegDeleteTreeW(ik, PCWSTR(w.as_ptr()));
+                                        let _ = RegCloseKey(ik);
+                                }
+                        }
+                        let _ = RegCloseKey(lang_key);
                 }
         }
 }
