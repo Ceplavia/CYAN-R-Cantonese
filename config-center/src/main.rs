@@ -96,10 +96,23 @@ fn disable_window_maximize() {
                                 }
                                 // Icon resource 1 — jyutping.ico embedded via
                                 // config-center.rc. MAKEINTRESOURCEW(1).
-                                let hicon = LoadIconW(None, PCWSTR(1usize as *const u16));
-                                if let Ok(hicon) = hicon {
-                                        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(hicon.0 as isize)));
-                                        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(hicon.0 as isize)));
+                                // hInstance must be our own module — NULL
+                                // makes Load* return predefined system icons.
+                                let hinst = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                                        .map(|h| -> HINSTANCE { h.into() })
+                                        .ok();
+                                for (kind, size) in [(ICON_BIG, 32), (ICON_SMALL, 16)] {
+                                        let hicon = LoadImageW(
+                                                hinst,
+                                                PCWSTR(1usize as *const u16),
+                                                IMAGE_ICON,
+                                                size,
+                                                size,
+                                                LR_DEFAULTCOLOR | LR_SHARED,
+                                        );
+                                        if let Ok(hicon) = hicon {
+                                                let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(hicon.0 as isize)));
+                                        }
                                 }
                         }
                         BOOL(1)
