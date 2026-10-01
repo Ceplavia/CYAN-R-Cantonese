@@ -83,6 +83,8 @@ unsafe extern "system" { ... }   // system = stdcall on x86, = C on x64
 
 **tips entry 累積**：`User Profile\<lang>` 每個語言 key 各自裝 `*:{clsid}{guid}` DWORD — config-center `sweep_tip_entries_except` 裝完會清走其它語言嘅我哋 entry（唔會每個 locale 留一個殘留）；tray `ensure_input_tip` 跟 `profile_registered()` 決定邊個 lang key 係 active — zh-HK 裝咗先有 0x0c04 profile（0404 只係 bridge host），切咗 zh-CN/zh-TW 之後唔好再寫 zh-Hant-HK entry。
 
+**升級殘留清理**：tray 有 `--cleanup`（user context：tips sweep + `Preload` 嘅 `e*0c04` 死 KLID + `SortOrder\AssemblyItem` 重複 CLSID 去重）同 `--cleanup-system`（elevated：`.DEFAULT` hive 同款）— installer `ssPostInstall` 兩個都跑（前者 `ExecAsOriginalUser`）。`.DEFAULT\User Profile\Languages` 嘅 phantom 語言冇郁（分唔出係我哋寫嘅定本身有）。
+
 **安裝/卸載規則**（dll 要喺 System32 — WoW 類 app 淨俾 system dir load，其它程序遲早都有同樣限制）：
 - 新裝：`r-cantonese.dll` → `{sys}`、`r-cantonese-x86.dll` → `{syswow64}`；**regsvr32 註嘅係 System32 嗰個**（註冊路徑 = load 路徑）
 - 升級 0.9.2 → 0.9.3：舊版 dll 喺 `{app}` — installer `ssInstall` 會先刪/搬埋佢（loaded file rename 得），CLSID 轉指 `{sys}` 嗰個

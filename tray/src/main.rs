@@ -19,6 +19,7 @@ use std::sync::Mutex;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER};
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 
 use windows::Win32::System::Threading::*;
@@ -86,8 +87,25 @@ fn ensure_input_tip() {
                         None
                 };
                 if let Some(keep) = keep {
-                        sweep_tip_entries_except(keep);
+                        sweep_tips_in(HKEY_CURRENT_USER, "Control Panel\\International\\User Profile", Some(keep));
                 }
+                clean_dead_preloads(HKEY_CURRENT_USER, "Keyboard Layout\\Preload");
+                clean_assembly_item_dups(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
+        }
+}
+
+/// `--cleanup` runs in the installing user's context; `--cleanup-system` runs
+/// elevated from the installer. Both purge residue left by older versions.
+fn cleanup_residue(system: bool) {
+        if system {
+                // .DEFAULT picked up tips/preload writes when old code ran
+                // elevated (regsvr32, elevated ILOT) — nothing there is legit.
+                use windows::Win32::System::Registry::HKEY_USERS;
+                sweep_tips_in(HKEY_USERS, ".DEFAULT\\Control Panel\\International\\User Profile", None);
+                clean_dead_preloads(HKEY_USERS, ".DEFAULT\\Keyboard Layout\\Preload");
+                clean_assembly_item_dups(HKEY_USERS, ".DEFAULT\\Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
+        } else {
+                ensure_input_tip();
         }
 }
 
@@ -116,20 +134,18 @@ fn profile_registered(langid: u16) -> bool {
         }
 }
 
-/// Delete `*:{clsid}{guid}` DWORDs from every `User Profile\<lang>` key
-/// except `keep` — entries under other languages surface as extra
-/// R-Cantonese rows in the language picker.
-fn sweep_tip_entries_except(keep: &str) {
+/// Delete `*:{clsid}{guid}` DWORDs from every `<root>\<lang>` key except the
+/// `keep` language — entries under other languages surface as extra
+/// R-Cantonese rows in the language picker. `keep: None` sweeps all of them
+/// (used for the .DEFAULT hive where nothing of ours is legitimate).
+fn sweep_tips_in(hive: HKEY, root: &str, keep: Option<&str>) {
         use windows::Win32::System::Registry::*;
         use windows::core::PWSTR;
         const SUFFIX: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
         unsafe {
-                let root_wide: Vec<u16> = "Control Panel\\International\\User Profile"
-                        .encode_utf16()
-                        .chain(Some(0))
-                        .collect();
-                let mut root = HKEY::default();
-                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(root_wide.as_ptr()), Some(0), KEY_READ, &mut root)
+                let root_wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+                let mut root_key = HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(root_wide.as_ptr()), Some(0), KEY_READ, &mut root_key)
                         != ERROR_SUCCESS
                 {
                         return;
@@ -139,7 +155,7 @@ fn sweep_tip_entries_except(keep: &str) {
                 loop {
                         let mut buf = [0u16; 128];
                         let mut len = buf.len() as u32;
-                        if RegEnumKeyExW(root, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                        if RegEnumKeyExW(root_key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
                                 != ERROR_SUCCESS
                         {
                                 break;
@@ -147,16 +163,16 @@ fn sweep_tip_entries_except(keep: &str) {
                         langs.push(String::from_utf16_lossy(&buf[..len as usize]));
                         i += 1;
                 }
-                let _ = RegCloseKey(root);
+                let _ = RegCloseKey(root_key);
                 for lang in langs {
-                        if lang.eq_ignore_ascii_case(keep) {
+                        if keep.is_some_and(|k| lang.eq_ignore_ascii_case(k)) {
                                 continue;
                         }
-                        let path = format!("Control Panel\\International\\User Profile\\{lang}\0");
+                        let path = format!("{root}\\{lang}\0");
                         let wide: Vec<u16> = path.encode_utf16().collect();
                         let mut sub = HKEY::default();
                         if RegOpenKeyExW(
-                                HKEY_CURRENT_USER,
+                                hive,
                                 PCWSTR(wide.as_ptr()),
                                 Some(0),
                                 KEY_READ | KEY_SET_VALUE,
@@ -187,6 +203,133 @@ fn sweep_tip_entries_except(keep: &str) {
                                 let _ = RegDeleteValueW(sub, PCWSTR(w.as_ptr()));
                         }
                         let _ = RegCloseKey(sub);
+                }
+        }
+}
+
+/// Delete Preload entries whose data is a custom (E-prefixed) zh-HK KLID —
+/// the old IMM32 path registered `e0000c04`; the E-range is user-defined, so
+/// anything `e*0c04` here is ours.
+fn clean_dead_preloads(hive: HKEY, path: &str) {
+        use windows::Win32::System::Registry::*;
+        use windows::core::PWSTR;
+        unsafe {
+                let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+                let mut key = HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(wide.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut key)
+                        != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let mut doomed = Vec::new();
+                let mut i = 0u32;
+                loop {
+                        let mut nbuf = [0u16; 64];
+                        let mut nlen = nbuf.len() as u32;
+                        let mut dbuf = [0u8; 64];
+                        let mut dlen = dbuf.len() as u32;
+                        if RegEnumValueW(
+                                key,
+                                i,
+                                Some(PWSTR(nbuf.as_mut_ptr())),
+                                &mut nlen,
+                                None,
+                                None,
+                                Some(dbuf.as_mut_ptr()),
+                                Some(&mut dlen),
+                        ) != ERROR_SUCCESS
+                        {
+                                break;
+                        }
+                        let u16s = (dlen as usize / 2).min(32);
+                        let data = String::from_utf16_lossy(std::slice::from_raw_parts(
+                                dbuf.as_ptr() as *const u16,
+                                u16s,
+                        ));
+                        let data = data.trim_end_matches('\0').to_string();
+                        let name = String::from_utf16_lossy(&nbuf[..nlen as usize]);
+                        if data.len() == 8
+                                && data.to_lowercase().starts_with('e')
+                                && data.to_lowercase().ends_with("0c04")
+                        {
+                                doomed.push(name);
+                        } else {
+                                i += 1;
+                        }
+                }
+                for name in doomed {
+                        let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                        let _ = RegDeleteValueW(key, PCWSTR(w.as_ptr()));
+                }
+                let _ = RegCloseKey(key);
+        }
+}
+
+/// `SortOrder\AssemblyItem\<lang>\<item-guid>` subkeys carry CLSID/Profile —
+/// keep the first subkey naming our CLSID, delete duplicates.
+fn clean_assembly_item_dups(hive: HKEY, root: &str) {
+        use windows::Win32::System::Registry::*;
+        use windows::core::PWSTR;
+        const OURS: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}";
+        unsafe {
+                for lang in ["0x00000404", "0x00000c04", "0x00000804"] {
+                        let path = format!("{root}\\{lang}\0");
+                        let wide: Vec<u16> = path.encode_utf16().collect();
+                        let mut key = HKEY::default();
+                        if RegOpenKeyExW(hive, PCWSTR(wide.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut key)
+                                != ERROR_SUCCESS
+                        {
+                                continue;
+                        }
+                        let mut seen = false;
+                        let mut doomed = Vec::new();
+                        let mut i = 0u32;
+                        loop {
+                                let mut buf = [0u16; 128];
+                                let mut len = buf.len() as u32;
+                                if RegEnumKeyExW(key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                        != ERROR_SUCCESS
+                                {
+                                        break;
+                                }
+                                let sub = String::from_utf16_lossy(&buf[..len as usize]);
+                                i += 1;
+                                let sub_path = format!("{root}\\{lang}\\{sub}\0");
+                                let swide: Vec<u16> = sub_path.encode_utf16().collect();
+                                let mut skey = HKEY::default();
+                                if RegOpenKeyExW(hive, PCWSTR(swide.as_ptr()), Some(0), KEY_READ, &mut skey)
+                                        != ERROR_SUCCESS
+                                {
+                                        continue;
+                                }
+                                let mut vbuf = [0u16; 64];
+                                let mut vlen = (vbuf.len() * 2) as u32;
+                                let vname: Vec<u16> = "CLSID".encode_utf16().chain(Some(0)).collect();
+                                let ok = RegQueryValueExW(
+                                        skey,
+                                        PCWSTR(vname.as_ptr()),
+                                        None,
+                                        None,
+                                        Some(vbuf.as_mut_ptr() as *mut u8),
+                                        Some(&mut vlen),
+                                ) == ERROR_SUCCESS;
+                                let _ = RegCloseKey(skey);
+                                if ok {
+                                        let text = String::from_utf16_lossy(&vbuf[..(vlen as usize / 2).saturating_sub(1)]);
+                                        if text.eq_ignore_ascii_case(OURS) {
+                                                if seen {
+                                                        doomed.push(sub);
+                                                } else {
+                                                        seen = true;
+                                                }
+                                        }
+                                }
+                        }
+                        for name in doomed {
+                                let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                                let _ = RegDeleteTreeW(key, PCWSTR(w.as_ptr()));
+                        }
+                        let _ = RegCloseKey(key);
                 }
         }
 }
@@ -408,6 +551,18 @@ fn class_windows() -> Vec<HWND> {
 }
 
 fn main() {
+        // Headless cleanup modes invoked by the installer post-install —
+        // run before the single-instance check so they work while a tray is
+        // already up.
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a.eq_ignore_ascii_case("--cleanup")) {
+                cleanup_residue(false);
+                return;
+        }
+        if args.iter().any(|a| a.eq_ignore_ascii_case("--cleanup-system")) {
+                cleanup_residue(true);
+                return;
+        }
         unsafe {
                 // Single instance among tray.exe-owned windows; stale
                 // in-process workers get told to quit instead of blocking us.
