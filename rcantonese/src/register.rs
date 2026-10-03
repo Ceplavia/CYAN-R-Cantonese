@@ -136,6 +136,11 @@ pub fn register_profiles() -> bool {
                 // 0x0c04 is the canonical zh-HK profile; 0x0404 (zh-TW) is the
                 // bridge path Weasel uses for HK users — cicero-unaware apps
                 // get the 0x04040404 dummy, which hosts our TIP in-process.
+                // Only the 0x0404 profile is enabled-by-default: an enabled
+                // 0x0c04 profile makes Windows seed a second zh-HK input
+                // source (Assemblies\0x00000c04 binding → duplicate flyout
+                // row), and no input path routes through it — zh-HK input
+                // goes via the `0404:` tips DWORD on the 0x0404 profile.
                 for langid in [TEXTSERVICE_LANGID, globals::TEXTSERVICE_BRIDGE_LANGID] {
                         let result = profile_mgr.RegisterProfile(
                                 &CLSID_RCANTONESE,
@@ -146,7 +151,7 @@ pub fn register_profiles() -> bool {
                                 icon_index,
                                 HKL::default(),
                                 0,
-                                true,
+                                langid == globals::TEXTSERVICE_BRIDGE_LANGID,
                                 0,
                         );
 

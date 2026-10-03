@@ -48,6 +48,11 @@ pub struct ServiceState {
         /// Active after "/" opens the punctuation list — accumulates the
         /// rime-style "/x" symbol/character query (empty = the slash menu).
         pub symbol_query: Option<String>,
+
+        /// Diagnosis flag — the first document focus is logged once so a
+        /// host that never focuses a TSF document (games that eat all input)
+        /// shows "ActivateEx start" with nothing after it.
+        pub focus_logged: bool,
 }
 
 impl ServiceState {
@@ -74,6 +79,7 @@ impl ServiceState {
                         processor: None,
                         composition_reading_code: String::new(),
                         symbol_query: None,
+                        focus_logged: false,
                 }
         }
 
@@ -384,6 +390,10 @@ impl ITfThreadMgrEventSink_Impl for RCantoneseService_Impl {
                         }
 
                         let focus = pdimfocus.cloned();
+                        if focus.is_some() && !state.focus_logged {
+                                state.focus_logged = true;
+                                globals::log_error("OnSetFocus: first document focus");
+                        }
                         if let Some(doc_mgr) = focus.clone() {
                                 unsafe {
                                         if let Ok(context) = doc_mgr.GetTop() {

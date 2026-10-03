@@ -91,6 +91,7 @@ fn ensure_input_tip() {
                 }
                 clean_dead_preloads(HKEY_CURRENT_USER, "Keyboard Layout\\Preload");
                 clean_assembly_item_dups(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
+                clean_dead_assemblies(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\Assemblies");
         }
 }
 
@@ -104,6 +105,7 @@ fn cleanup_residue(system: bool) {
                 sweep_tips_in(HKEY_USERS, ".DEFAULT\\Control Panel\\International\\User Profile", None);
                 clean_dead_preloads(HKEY_USERS, ".DEFAULT\\Keyboard Layout\\Preload");
                 clean_assembly_item_dups(HKEY_USERS, ".DEFAULT\\Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
+                clean_dead_assemblies(HKEY_USERS, ".DEFAULT\\Software\\Microsoft\\CTF\\Assemblies");
         } else {
                 // Registry-only reconcile — skip the InstallLayoutOrTip
                 // language force-add (it can spawn a hidden system dialog
@@ -125,6 +127,7 @@ fn cleanup_residue(system: bool) {
                 }
                 clean_dead_preloads(HKEY_CURRENT_USER, "Keyboard Layout\\Preload");
                 clean_assembly_item_dups(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
+                clean_dead_assemblies(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\Assemblies");
         }
 }
 
@@ -282,25 +285,19 @@ fn clean_dead_preloads(hive: HKEY, path: &str) {
         }
 }
 
-/// `SortOrder\AssemblyItem\<langid>\<item-guid>\<order>` leaves carry
-/// CLSID/Profile — enabling a tips DWORD creates one; deleting the DWORD
-/// later leaves the leaf behind as an orphan flyout row. For our CLSID a leaf
-/// is legit only while a `{langid}:{clsid}{guid}` DWORD exists under that
-/// hive's `User Profile\<lang>`; otherwise (and for dups) delete it.
-fn clean_assembly_item_dups(hive: HKEY, root: &str) {
+/// Langids that still have a live tips DWORD naming our tip — the DWORD
+/// prefix (e.g. "0404") selects the profile's langid.
+fn live_tip_langids(hive: HKEY) -> std::collections::HashSet<u32> {
         use windows::Win32::System::Registry::*;
         use windows::core::PWSTR;
-        const OURS: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}";
         const OUR_TIP: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+        let tips_root = if hive == HKEY_USERS {
+                ".DEFAULT\\Control Panel\\International\\User Profile"
+        } else {
+                "Control Panel\\International\\User Profile"
+        };
+        let mut active_langs = std::collections::HashSet::new();
         unsafe {
-                // Langids that still have a live tips DWORD naming our tip —
-                // the DWORD prefix (e.g. "0404") selects the profile's langid.
-                let tips_root = if hive == HKEY_USERS {
-                        ".DEFAULT\\Control Panel\\International\\User Profile"
-                } else {
-                        "Control Panel\\International\\User Profile"
-                };
-                let mut active_langs = std::collections::HashSet::new();
                 let tr_wide: Vec<u16> = tips_root.encode_utf16().chain(Some(0)).collect();
                 let mut tips_key = HKEY::default();
                 if RegOpenKeyExW(hive, PCWSTR(tr_wide.as_ptr()), Some(0), KEY_READ, &mut tips_key)
@@ -351,6 +348,21 @@ fn clean_assembly_item_dups(hive: HKEY, root: &str) {
                                 let _ = RegCloseKey(lang_key);
                         }
                 }
+        }
+        active_langs
+}
+
+/// `SortOrder\AssemblyItem\<langid>\<item-guid>\<order>` leaves carry
+/// CLSID/Profile — enabling a tips DWORD creates one; deleting the DWORD
+/// later leaves the leaf behind as an orphan flyout row. For our CLSID a leaf
+/// is legit only while a `{langid}:{clsid}{guid}` DWORD exists under that
+/// hive's `User Profile\<lang>`; otherwise (and for dups) delete it.
+fn clean_assembly_item_dups(hive: HKEY, root: &str) {
+        use windows::Win32::System::Registry::*;
+        use windows::core::PWSTR;
+        const OURS: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}";
+        unsafe {
+                let active_langs = live_tip_langids(hive);
 
                 // Enumerate AssemblyItem\<langid>\<item>\<order>; drop leaves
                 // whose langid has no live tips DWORD, dedupe the rest.
@@ -479,6 +491,121 @@ fn clean_assembly_item_dups(hive: HKEY, root: &str) {
                                 }
                         }
                         let _ = RegCloseKey(lang_key);
+                }
+        }
+}
+
+/// `CTF\Assemblies\<langid>\<item-guid>` is a *separate* cache from
+/// AssemblyItem — each leaf binds our CLSID to a KeyboardLayout HKL. Leaves
+/// survive their tips DWORD just like AssemblyItem leaves and produce the
+/// same phantom flyout row (e.g. a 0x0c04 binding left by the old `0C04:`
+/// path). Same rule: ours + no `{langid}:{ours}` tips DWORD = orphan.
+fn clean_dead_assemblies(hive: HKEY, root: &str) {
+        use windows::Win32::System::Registry::*;
+        use windows::core::PWSTR;
+        const OURS: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}";
+        unsafe {
+                let active_langs = live_tip_langids(hive);
+                let asm_wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+                let mut asm_key = HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(asm_wide.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut asm_key)
+                        != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let mut lang_roots = Vec::new();
+                let mut i = 0u32;
+                loop {
+                        let mut buf = [0u16; 32];
+                        let mut len = buf.len() as u32;
+                        if RegEnumKeyExW(asm_key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                != ERROR_SUCCESS
+                        {
+                                break;
+                        }
+                        lang_roots.push(String::from_utf16_lossy(&buf[..len as usize]));
+                        i += 1;
+                }
+                let _ = RegCloseKey(asm_key);
+                for lang_root in lang_roots {
+                        let Some(langid) = lang_root
+                                .strip_prefix("0x")
+                                .or_else(|| lang_root.strip_prefix("0X"))
+                                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                        else {
+                                continue;
+                        };
+                        let lang_active = active_langs.contains(&langid);
+                        let lang_path = format!("{root}\\{lang_root}\0");
+                        let lw: Vec<u16> = lang_path.encode_utf16().collect();
+                        let mut lang_key = HKEY::default();
+                        if RegOpenKeyExW(hive, PCWSTR(lw.as_ptr()), Some(0), KEY_READ, &mut lang_key)
+                                != ERROR_SUCCESS
+                        {
+                                continue;
+                        }
+                        let mut items = Vec::new();
+                        let mut i = 0u32;
+                        loop {
+                                let mut buf = [0u16; 128];
+                                let mut len = buf.len() as u32;
+                                if RegEnumKeyExW(lang_key, i, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                                        != ERROR_SUCCESS
+                                {
+                                        break;
+                                }
+                                items.push(String::from_utf16_lossy(&buf[..len as usize]));
+                                i += 1;
+                        }
+                        let _ = RegCloseKey(lang_key);
+                        let mut seen = false;
+                        let mut doomed = Vec::new();
+                        for item in items {
+                                // Read the leaf's Default value — it's the
+                                // bound CLSID. Only delete OUR bindings.
+                                let ip = format!("{root}\\{lang_root}\\{item}\0");
+                                let iw: Vec<u16> = ip.encode_utf16().collect();
+                                let mut ikey = HKEY::default();
+                                if RegOpenKeyExW(hive, PCWSTR(iw.as_ptr()), Some(0), KEY_READ, &mut ikey)
+                                        != ERROR_SUCCESS
+                                {
+                                        continue;
+                                }
+                                let mut vbuf = [0u16; 64];
+                                let mut vlen = (vbuf.len() * 2) as u32;
+                                let vname: Vec<u16> = "Default".encode_utf16().chain(Some(0)).collect();
+                                let ok = RegQueryValueExW(
+                                        ikey,
+                                        PCWSTR(vname.as_ptr()),
+                                        None,
+                                        None,
+                                        Some(vbuf.as_mut_ptr() as *mut u8),
+                                        Some(&mut vlen),
+                                ) == ERROR_SUCCESS;
+                                let _ = RegCloseKey(ikey);
+                                if ok {
+                                        let text = String::from_utf16_lossy(&vbuf[..(vlen as usize / 2).saturating_sub(1)]);
+                                        if text.eq_ignore_ascii_case(OURS) {
+                                                if !lang_active || seen {
+                                                        doomed.push(item);
+                                                } else {
+                                                        seen = true;
+                                                }
+                                        }
+                                }
+                        }
+                        for item in doomed {
+                                let ip = format!("{root}\\{lang_root}\0");
+                                let iw: Vec<u16> = ip.encode_utf16().collect();
+                                let mut ik = HKEY::default();
+                                if RegOpenKeyExW(hive, PCWSTR(iw.as_ptr()), Some(0), KEY_ALL_ACCESS, &mut ik)
+                                        == ERROR_SUCCESS
+                                {
+                                        let w: Vec<u16> = item.encode_utf16().chain(Some(0)).collect();
+                                        let _ = RegDeleteTreeW(ik, PCWSTR(w.as_ptr()));
+                                        let _ = RegCloseKey(ik);
+                                }
+                        }
                 }
         }
 }
