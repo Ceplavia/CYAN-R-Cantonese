@@ -242,7 +242,8 @@ impl RCantoneseService_Impl {
                 let mut path = [0u16; 260];
                 let len = unsafe { GetModuleFileNameW(None, &mut path) };
                 let name = String::from_utf16_lossy(&path[..len as usize]);
-                globals::log_error(&format!("ActivateEx start proc={}", name.rsplit('\\').next().unwrap_or(&name)));
+                let hkl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0) }.0 as usize;
+                globals::log_error(&format!("ActivateEx start proc={} hkl={hkl:#010x}", name.rsplit('\\').next().unwrap_or(&name)));
                 let thread_mgr = ptim.as_ref().ok_or(E_INVALIDARG)?;
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
