@@ -164,6 +164,10 @@ pub fn register_profiles() -> bool {
                         // repeat registration (TF_E_ALREADY_EXISTS) — rewrite
                         // it directly so upgrades pick up the new path.
                         write_profile_icon(langid, &icon_file);
+                        // Same for Enable: an old install left the 0x0c04
+                        // profile enabled, and repeat registration won't
+                        // flip it back — the flyout keeps the phantom row.
+                        write_profile_enable(langid, langid == globals::TEXTSERVICE_BRIDGE_LANGID);
                         globals::log_error(&format!(
                                 "RegisterProfiles: {langid:#06x} result ok, icon={}",
                                 String::from_utf16_lossy(&icon_file[..icon_file.len().saturating_sub(1)])
@@ -219,6 +223,41 @@ fn write_profile_icon(langid: u16, icon_file: &[u16]) {
                 let name: Vec<u16> = "IconIndex".encode_utf16().chain(Some(0)).collect();
                 let index = (0i32 - globals::TEXTSERVICE_ICON_INDEX as i32) as u32;
                 let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&index.to_le_bytes()));
+                let _ = RegCloseKey(key);
+        }
+}
+
+/// Write the profile's Enable flag directly — RegisterProfile won't update
+/// it on repeat registration, so an enabled 0x0c04 profile left by an older
+/// build keeps seeding a second zh-HK flyout row forever.
+fn write_profile_enable(langid: u16, enabled: bool) {
+        unsafe {
+                let path = format!(
+                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile\\{:#010x}\\{}",
+                        guid_to_string(&CLSID_RCANTONESE),
+                        langid,
+                        guid_to_string(&GUID_PROFILE)
+                );
+                let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+                let mut key = HKEY::default();
+                let create = RegCreateKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_READ | KEY_WRITE | KEY_WOW64_64KEY,
+                        None,
+                        &mut key,
+                        None,
+                );
+                if create != ERROR_SUCCESS {
+                        globals::log_error(&format!("write_profile_enable: RegCreateKeyExW failed {:?}", create));
+                        return;
+                }
+                let name: Vec<u16> = "Enable".encode_utf16().chain(Some(0)).collect();
+                let v: u32 = enabled as u32;
+                let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&v.to_le_bytes()));
                 let _ = RegCloseKey(key);
         }
 }

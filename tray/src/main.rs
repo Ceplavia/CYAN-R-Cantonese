@@ -228,9 +228,17 @@ fn sweep_tips_in(hive: HKEY, root: &str, keep: Option<&str>) {
         }
 }
 
-/// Delete Preload entries whose data is a custom (E-prefixed) zh-HK KLID —
-/// the old IMM32 path registered `e0000c04`; the E-range is user-defined, so
-/// anything `e*0c04` here is ours.
+/// A custom zh-HK KLID — the `[de]`-prefixed range is user/IME-defined; the
+/// old IMM32/`0C04:` paths registered `e0000c04`-style ids and ILOT tipped
+/// `d0010c04`-style ones, so anything `[de]*0c04` is our residue.
+fn is_dead_zhhk_klid(s: &str) -> bool {
+        let s = s.to_lowercase();
+        s.len() == 8 && (s.starts_with('e') || s.starts_with('d')) && s.ends_with("0c04")
+}
+
+/// Delete Preload entries whose data is a custom zh-HK KLID, and the matching
+/// Substitutes entries (the substitute chain `d0010c04→00000c04→00000409`
+/// keeps a dead zh-HK input source alive in the flyout).
 fn clean_dead_preloads(hive: HKEY, path: &str) {
         use windows::Win32::System::Registry::*;
         use windows::core::PWSTR;
@@ -269,10 +277,7 @@ fn clean_dead_preloads(hive: HKEY, path: &str) {
                         ));
                         let data = data.trim_end_matches('\0').to_string();
                         let name = String::from_utf16_lossy(&nbuf[..nlen as usize]);
-                        if data.len() == 8
-                                && data.to_lowercase().starts_with('e')
-                                && data.to_lowercase().ends_with("0c04")
-                        {
+                        if is_dead_zhhk_klid(&data) {
                                 doomed.push(name);
                         }
                         i += 1;
@@ -282,6 +287,42 @@ fn clean_dead_preloads(hive: HKEY, path: &str) {
                         let _ = RegDeleteValueW(key, PCWSTR(w.as_ptr()));
                 }
                 let _ = RegCloseKey(key);
+
+                // Substitutes\<klid> entries naming a dead KLID keep the HKL
+                // resolvable — delete those too (value data, not the name,
+                // decides whether a substitute is needed).
+                let subs_path = if hive == HKEY_USERS {
+                        ".DEFAULT\\Keyboard Layout\\Substitutes"
+                } else {
+                        "Keyboard Layout\\Substitutes"
+                };
+                let wide: Vec<u16> = subs_path.encode_utf16().chain(Some(0)).collect();
+                let mut skey = HKEY::default();
+                if RegOpenKeyExW(hive, PCWSTR(wide.as_ptr()), Some(0), KEY_READ | KEY_SET_VALUE, &mut skey)
+                        == ERROR_SUCCESS
+                {
+                        let mut doomed_subs = Vec::new();
+                        let mut i = 0u32;
+                        loop {
+                                let mut nbuf = [0u16; 64];
+                                let mut nlen = nbuf.len() as u32;
+                                if RegEnumValueW(skey, i, Some(PWSTR(nbuf.as_mut_ptr())), &mut nlen, None, None, None, None)
+                                        != ERROR_SUCCESS
+                                {
+                                        break;
+                                }
+                                i += 1;
+                                let name = String::from_utf16_lossy(&nbuf[..nlen as usize]);
+                                if is_dead_zhhk_klid(&name) {
+                                        doomed_subs.push(name);
+                                }
+                        }
+                        for name in doomed_subs {
+                                let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                                let _ = RegDeleteValueW(skey, PCWSTR(w.as_ptr()));
+                        }
+                        let _ = RegCloseKey(skey);
+                }
         }
 }
 
