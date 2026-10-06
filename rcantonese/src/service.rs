@@ -57,6 +57,9 @@ pub struct ServiceState {
         /// Diagnosis flag — first keystroke offered to OnTestKeyDown is
         /// logged once; key chatter stays debug-only otherwise.
         pub keys_logged: bool,
+
+        /// Diagnosis flag — first key-handler failure logged once.
+        pub handler_error_logged: bool,
 }
 
 impl ServiceState {
@@ -85,6 +88,7 @@ impl ServiceState {
                         symbol_query: None,
                         focus_logged: false,
                         keys_logged: false,
+                        handler_error_logged: false,
                 }
         }
 
@@ -521,7 +525,18 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                         // The edit session may run synchronously; do not hold the lock.
                         match crate::keys::invoke_key_handler(&service, client_id, processor, &context, code, wch, key_state) {
                                 Ok(()) => Ok(BOOL(1)),
-                                Err(_) => Ok(BOOL(0)),
+                                Err(e) => {
+                                        // A failed handler passes the raw key
+                                        // through — apps show plain letters
+                                        // with no composition. Log once.
+                                        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                                        if !state.handler_error_logged {
+                                                state.handler_error_logged = true;
+                                                globals::log_error(&format!("OnKeyDown: key handler failed {e:?}"));
+                                        }
+                                        drop(state);
+                                        Ok(BOOL(0))
+                                }
                         }
                 })
         }
