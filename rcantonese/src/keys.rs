@@ -27,13 +27,13 @@ fn thread_compartment(state: &ServiceState, guid: GUID) -> Compartment {
         Compartment::new(&unknown.unwrap(), state.client_id, guid)
 }
 
-fn is_keyboard_disabled(state: &ServiceState) -> bool {
+pub(crate) fn is_keyboard_disabled(state: &ServiceState) -> bool {
         thread_compartment(state, GUID_COMPARTMENT_KEYBOARD_DISABLED)
                 .get_bool()
                 .unwrap_or(false)
 }
 
-fn is_keyboard_open(state: &ServiceState) -> bool {
+pub(crate) fn is_keyboard_open(state: &ServiceState) -> bool {
         thread_compartment(state, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)
                 .get_bool()
                 .unwrap_or(true)

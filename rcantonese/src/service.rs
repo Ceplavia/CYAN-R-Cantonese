@@ -53,6 +53,10 @@ pub struct ServiceState {
         /// host that never focuses a TSF document (games that eat all input)
         /// shows "ActivateEx start" with nothing after it.
         pub focus_logged: bool,
+
+        /// Diagnosis flag — first keystroke offered to OnTestKeyDown is
+        /// logged once; key chatter stays debug-only otherwise.
+        pub keys_logged: bool,
 }
 
 impl ServiceState {
@@ -80,6 +84,7 @@ impl ServiceState {
                         composition_reading_code: String::new(),
                         symbol_query: None,
                         focus_logged: false,
+                        keys_logged: false,
                 }
         }
 
@@ -393,7 +398,9 @@ impl ITfThreadMgrEventSink_Impl for RCantoneseService_Impl {
                         let focus = pdimfocus.cloned();
                         if focus.is_some() && !state.focus_logged {
                                 state.focus_logged = true;
-                                globals::log_error("OnSetFocus: first document focus");
+                                let open = crate::keys::is_keyboard_open(&state);
+                                let disabled = crate::keys::is_keyboard_disabled(&state);
+                                globals::log_error(&format!("OnSetFocus: first document focus open={open} disabled={disabled}"));
                         }
                         if let Some(doc_mgr) = focus.clone() {
                                 unsafe {
@@ -473,6 +480,10 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                 globals::guarded("OnTestKeyDown", || {
                         globals::log(&format!("OnTestKeyDown vk={:#04x} pid={}", wparam.0, std::process::id()));
                         let Some(mut state) = self.try_lock() else { return Ok(BOOL(0)) };
+                        if !state.keys_logged {
+                                state.keys_logged = true;
+                                globals::log_error(&format!("first keystroke vk={:#04x}", wparam.0));
+                        }
                         let Some(context) = pic.as_ref() else { return Ok(BOOL(0)) };
                         let r = crate::keys::test_key(&mut state, context, wparam.0, lparam.0, true);
                         globals::log(&format!(
