@@ -388,6 +388,9 @@ impl ITfThreadMgrEventSink_Impl for RCantoneseService_Impl {
                 globals::guarded("OnSetFocus", || {
                         let Some(mut state) = self.try_lock() else { return Ok(()) };
                         let self_sink: IUnknown = self.as_iunknown();
+                        // Caret context changed — the remembered last-output
+                        // char is no longer adjacent to the caret.
+                        crate::keys::clear_output_char();
 
                         // unadvise the old text edit sink
                         if let Some(old) = state.text_edit_sink_context.take() {
@@ -497,8 +500,18 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                                 if r.is_some() { "eat" } else { "pass" }
                         ));
                         match r {
-                                Some(_) => Ok(BOOL(1)),
-                                None => Ok(BOOL(0)),
+                                Some(_) => {
+                                        // Eaten — the handler may commit text
+                                        // (tracked there); until then the
+                                        // remembered doc char is stale.
+                                        crate::keys::clear_output_char();
+                                        Ok(BOOL(1))
+                                }
+                                None => {
+                                        let (_, wch) = crate::keys::convert_virtual_key(wparam.0, lparam.0);
+                                        crate::keys::note_unhandled_key(wch);
+                                        Ok(BOOL(0))
+                                }
                         }
                 })
         }
@@ -535,6 +548,7 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                                                 globals::log_error(&format!("OnKeyDown: key handler failed {e:?}"));
                                         }
                                         drop(state);
+                                        crate::keys::note_unhandled_key(wch);
                                         Ok(BOOL(0))
                                 }
                         }

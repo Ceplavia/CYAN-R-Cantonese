@@ -342,6 +342,7 @@ pub fn set_input_string(state: &mut ServiceState, ec: u32, context: &ITfContext,
 
 /// Port of _AddComposingAndChar.
 pub fn add_composing_and_char(state: &mut ServiceState, ec: u32, context: &ITfContext, text: &[u16]) -> Result<()> {
+        crate::keys::note_output_text(text);
         let mut selection = [TF_SELECTION::default()];
         let mut fetched = 0u32;
         unsafe {
@@ -361,6 +362,7 @@ pub fn add_composing_and_char(state: &mut ServiceState, ec: u32, context: &ITfCo
 
 /// Port of _AddCharAndFinalize.
 pub fn add_char_and_finalize(ec: u32, context: &ITfContext, text: &[u16]) -> Result<()> {
+        crate::keys::note_output_text(text);
         let mut selection = [TF_SELECTION::default()];
         let mut fetched = 0u32;
         unsafe {

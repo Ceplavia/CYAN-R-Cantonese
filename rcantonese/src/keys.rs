@@ -39,6 +39,36 @@ pub(crate) fn is_keyboard_open(state: &ServiceState) -> bool {
                 .unwrap_or(true)
 }
 
+thread_local! {
+        /// Last character that landed in the document or passed through to
+        /// the app — the fallback for `prev_doc_char` on synthetic text
+        /// stores (bridge/IMM32 hosts like Telegram can't read the doc back).
+        static LAST_OUTPUT_CHAR: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
+}
+
+/// Committed text reached the document — remember its final char.
+pub(crate) fn note_output_text(text: &[u16]) {
+        LAST_OUTPUT_CHAR.with(|c| c.set(text.last().copied()));
+}
+
+/// A key we didn't handle reached the app — the app sees `wch` (or nothing
+/// printable, which clears the run).
+pub(crate) fn note_unhandled_key(wch: u16) {
+        LAST_OUTPUT_CHAR.with(|c| c.set(if (0x20..=0x7e).contains(&wch) { Some(wch) } else { None }));
+}
+
+/// The caret context changed (focus moved, a key was eaten before its
+/// handler ran) — the remembered char is no longer adjacent.
+pub(crate) fn clear_output_char() {
+        LAST_OUTPUT_CHAR.with(|c| c.set(None));
+}
+
+fn last_output_was_ascii_digit() -> bool {
+        LAST_OUTPUT_CHAR
+                .with(|c| c.get())
+                .is_some_and(|c| (u16::from(b'0')..=u16::from(b'9')).contains(&c))
+}
+
 /// Whether Caps Lock is toggled on — the IME treats it as English mode:
 /// keys pass through untouched and the mode indicator shows "A".
 pub(crate) fn caps_lock_on() -> bool {
@@ -50,7 +80,7 @@ pub(crate) fn caps_lock_on() -> bool {
 static CAPS_WAS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Port of _ConvertVirtualKey — map the key event to a character.
-fn convert_virtual_key(wparam: usize, lparam: isize) -> (u32, u16) {
+pub(crate) fn convert_virtual_key(wparam: usize, lparam: isize) -> (u32, u16) {
         let code = wparam as u32;
         if code == crate::keytable::VK_PACKET {
                 // VK_PACKET carries the character in lParam's low word.
@@ -782,8 +812,13 @@ fn handle_punctuation_key(state: &mut ServiceState, ec: u32, context: &ITfContex
                 .get_bool()
                 .unwrap_or(true);
         // punctuation::decide — instant symbols commit directly, and "."
-        // after an ASCII digit stays half-width.
-        let action = crate::punctuation::decide(code, is_shifting, is_cantonese, prev_char_is_ascii_digit(ec, context));
+        // after an ASCII digit stays half-width. Synthetic stores (bridge
+        // hosts) can't be read back — fall back to the last char we emitted.
+        let prev_is_digit = match prev_doc_char(ec, context) {
+                Some(c) => (u16::from(b'0')..=u16::from(b'9')).contains(&c),
+                None => last_output_was_ascii_digit(),
+        };
+        let action = crate::punctuation::decide(code, is_shifting, is_cantonese, prev_is_digit);
         match action {
                 crate::punctuation::PunctAction::Pass => return Err(Error::from_hresult(E_INVALIDARG)),
                 _ => {}
@@ -801,10 +836,10 @@ fn handle_punctuation_key(state: &mut ServiceState, ec: u32, context: &ITfContex
         }
 }
 
-/// Is the document character right before the caret an ASCII digit? Powers
-/// the number-context "." rule. Stateless — reads the text store, so it
-/// stays correct after mouse clicks and external edits.
-fn prev_char_is_ascii_digit(ec: u32, context: &ITfContext) -> bool {
+/// The document character right before the caret. `None` means the store
+/// can't be read (synthetic/bridge contexts); `Some(0)` means the caret is
+/// at the start of the document — there is no previous char.
+fn prev_doc_char(ec: u32, context: &ITfContext) -> Option<u16> {
         unsafe {
                 let mut selection = [TF_SELECTION::default()];
                 let mut fetched = 0u32;
@@ -813,26 +848,25 @@ fn prev_char_is_ascii_digit(ec: u32, context: &ITfContext) -> bool {
                         .is_err()
                         || fetched == 0
                 {
-                        return false;
+                        return None;
                 }
                 let Some(sel_range) = std::mem::ManuallyDrop::take(&mut selection[0].range) else {
-                        return false;
+                        return None;
                 };
-                let Ok(prev) = sel_range.Clone() else { return false };
+                let prev = sel_range.Clone().ok()?;
                 let mut moved = 0i32;
-                if prev
-                        .ShiftStart(ec, -1, &mut moved, std::ptr::null())
-                        .is_err()
-                        || moved == 0
-                {
-                        return false;
+                if prev.ShiftStart(ec, -1, &mut moved, std::ptr::null()).is_err() {
+                        return None;
+                }
+                if moved == 0 {
+                        return Some(0);
                 }
                 let mut buf = [0u16; 1];
                 let mut got = 0u32;
                 if prev.GetText(ec, 0, &mut buf, &mut got).is_err() || got == 0 {
-                        return false;
+                        return None;
                 }
-                (u16::from(b'0')..=u16::from(b'9')).contains(&buf[0])
+                Some(buf[0])
         }
 }
 
