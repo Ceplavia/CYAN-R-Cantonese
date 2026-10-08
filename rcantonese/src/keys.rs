@@ -285,15 +285,11 @@ pub fn test_key(
                 {
                         return Some((key_state, code, wch));
                 }
-        } else if key_state.category == KeystrokeCategory::InvokeCompositionEditSession {
-                // Unhandled printable key while a composition is open — the
-                // app must not receive it inside the live composition range
-                // (the insert lands at a scrambled offset, e.g. "imm"+3+2
-                // coming out as "2imm3"). Eat it here: the handler finalizes
-                // the composition first, then emits the char itself.
-                globals::log(&format!("test_key: eat-for-finalize code={code:#04x} wch={wch:#06x}"));
-                return Some((key_state, code, wch));
         }
+        // Punctuation must win over the finalize-and-emit fallback below: a
+        // punct key while composing commits the selected candidate and appends
+        // the (possibly full-width) symbol — "neihou," -> "你好，" — whereas
+        // the fallback would commit the raw reading plus the ASCII char.
         if should_handle_punctuation {
                 return Some((
                         KeystrokeState {
@@ -303,6 +299,15 @@ pub fn test_key(
                         code,
                         wch,
                 ));
+        }
+        if key_state.category == KeystrokeCategory::InvokeCompositionEditSession {
+                // Unhandled printable key while a composition is open — the
+                // app must not receive it inside the live composition range
+                // (the insert lands at a scrambled offset, e.g. "imm"+3+2
+                // coming out as "2imm3"). Eat it here: the handler finalizes
+                // the composition first, then emits the char itself.
+                globals::log(&format!("test_key: eat-for-finalize code={code:#04x} wch={wch:#06x}"));
+                return Some((key_state, code, wch));
         }
         // Full-width character form conversion (only outside candidate lists).
         if state.candidate_mode == CandidateMode::None
