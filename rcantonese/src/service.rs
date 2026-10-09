@@ -60,6 +60,11 @@ pub struct ServiceState {
 
         /// Diagnosis flag — first key-handler failure logged once.
         pub handler_error_logged: bool,
+
+        /// Diagnosis flag — first ITfKeyEventSink::OnSetFocus logged once.
+        /// Distinct from document focus: msctf grants "key focus" separately,
+        /// and keystrokes only reach sinks it has granted focus to.
+        pub key_focus_logged: bool,
 }
 
 impl ServiceState {
@@ -89,6 +94,7 @@ impl ServiceState {
                         focus_logged: false,
                         keys_logged: false,
                         handler_error_logged: false,
+                        key_focus_logged: false,
                 }
         }
 
@@ -252,7 +258,7 @@ impl RCantoneseService_Impl {
                 let len = unsafe { GetModuleFileNameW(None, &mut path) };
                 let name = String::from_utf16_lossy(&path[..len as usize]);
                 let hkl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0) }.0 as usize;
-                globals::log_error(&format!("ActivateEx start proc={} hkl={hkl:#010x}", name.rsplit('\\').next().unwrap_or(&name)));
+                globals::log_error(&format!("ActivateEx start proc={} hkl={hkl:#010x} flags={dwflags:#06x}", name.rsplit('\\').next().unwrap_or(&name)));
                 let thread_mgr = ptim.as_ref().ok_or(E_INVALIDARG)?;
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -479,7 +485,15 @@ impl ITfTextEditSink_Impl for RCantoneseService_Impl {
 // ---------------------------------------------------------------------
 
 impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
-        fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
+        fn OnSetFocus(&self, fforeground: BOOL) -> Result<()> {
+                // Key-focus grant — distinct from document focus. msctf offers
+                // keystrokes only to sinks it has granted focus.
+                if let Ok(mut state) = self.state.lock() {
+                        if !state.key_focus_logged {
+                                state.key_focus_logged = true;
+                                globals::log_error(&format!("key sink OnSetFocus fForeground={}", fforeground.as_bool()));
+                        }
+                }
                 Ok(())
         }
 
