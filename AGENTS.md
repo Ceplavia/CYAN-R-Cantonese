@@ -5,6 +5,11 @@
 - 路徑 `%LOCALAPPDATA%\RCantonese\Logs\RCantonese.log`（同 settings.toml 一齊）
 - release build 淨係寫 `log_error`；`log` 係 debug-only
 
+### ⚠️ 死鎖紅線（2026-10-10 — 曾搞到登入頁全機凍死）
+- **Sink callback（`ITfKeyEventSink`、`ITfThreadMgrEventSink` 等）入面永遠唔准 `self.state.lock()`** — msctf 可以喺我哋揸住 lock 嗰陣同步 call 返入嚟（例：`activate_ex_inner` hold 住 `state` 做 `AdviseKeyEventSink`，若 host 嗰下已有 key-focus，msctf 即場 sync call `OnSetFocus(TRUE)`）→ 同 thread 再 lock 非遞歸 Mutex = 永久死鎖。**喺 LogonUI 觸發 = 成個 secure desktop 凍死，只剩 mouse 郁**。要用 `try_lock()`（揸唔到就 bail）或者 lock-free Atomic 探針
+- **`DllMain` 唔准做 file I/O**（包括 `log_error`/`log`）— loader lock 下寫檔/讀 env 違規；load-vs-activate 診斷要用其它路數（e.g. Atomic flag + 遲啲先寫）
+- `DllGetClassObject`/`ActivateEx` 入面 log 冇問題（唔係 loader lock 下）
+
 ### Shift / preserved key
 - `OnPreservedKey` 時仲 compose 緊 → 先 queue async edit session commit raw input，先至 flip compartment（唔做嘅話 composition 吊喺度，之後撳 space 會出真空格）
 - langbar compartment sink `OnChange` **唔可以掂 TSF**（SetValue broadcast 入面 call `OnUpdate`/`GetValue` 會喺某啲 app 死鎖）— 只係 `PostMessage` 去 per-thread message-only window（`RCantoneseRefreshWnd`），`langbar::deferred_refresh` 先至做 `notify_update` + `tray::update_mode`

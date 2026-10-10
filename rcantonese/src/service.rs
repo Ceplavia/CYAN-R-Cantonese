@@ -60,11 +60,6 @@ pub struct ServiceState {
 
         /// Diagnosis flag — first key-handler failure logged once.
         pub handler_error_logged: bool,
-
-        /// Diagnosis flag — first ITfKeyEventSink::OnSetFocus logged once.
-        /// Distinct from document focus: msctf grants "key focus" separately,
-        /// and keystrokes only reach sinks it has granted focus to.
-        pub key_focus_logged: bool,
 }
 
 impl ServiceState {
@@ -94,7 +89,6 @@ impl ServiceState {
                         focus_logged: false,
                         keys_logged: false,
                         handler_error_logged: false,
-                        key_focus_logged: false,
                 }
         }
 
@@ -488,11 +482,13 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
         fn OnSetFocus(&self, fforeground: BOOL) -> Result<()> {
                 // Key-focus grant — distinct from document focus. msctf offers
                 // keystrokes only to sinks it has granted focus.
-                if let Ok(mut state) = self.state.lock() {
-                        if !state.key_focus_logged {
-                                state.key_focus_logged = true;
-                                globals::log_error(&format!("key sink OnSetFocus fForeground={}", fforeground.as_bool()));
-                        }
+                // NEVER lock self.state here: msctf can call this synchronously
+                // while we're inside ActivateEx holding the lock (e.g. LogonUI
+                // advises the sink while its field already has key focus) —
+                // a blocking lock self-deadlocks and froze the secure desktop.
+                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        globals::log_error(&format!("key sink OnSetFocus fForeground={}", fforeground.as_bool()));
                 }
                 Ok(())
         }

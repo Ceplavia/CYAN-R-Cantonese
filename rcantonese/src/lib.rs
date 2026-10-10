@@ -39,13 +39,6 @@ use windows::core::{BOOL, GUID, HRESULT};
 extern "system" fn DllMain(hinstance: HINSTANCE, reason: u32, _reserved: *const core::ffi::c_void) -> BOOL {
         if reason == DLL_PROCESS_ATTACH {
                 globals::DLL_INSTANCE.store(hinstance.0 as isize, std::sync::atomic::Ordering::Relaxed);
-                // Real (non-datafile) loads only — icon extraction maps the file
-                // without running DllMain. One line per process, same cost as
-                // the DllGetClassObject probe below.
-                let mut path = [0u16; 260];
-                let len = unsafe { windows::Win32::System::LibraryLoader::GetModuleFileNameW(None, &mut path) };
-                let name = String::from_utf16_lossy(&path[..len as usize]);
-                globals::log_error(&format!("dll attach proc={}", name.rsplit('\\').next().unwrap_or(&name)));
         } else if reason == DLL_PROCESS_DETACH {
         }
         BOOL(1)
