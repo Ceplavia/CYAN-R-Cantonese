@@ -490,10 +490,9 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                 // while we're inside ActivateEx holding the lock (e.g. LogonUI
                 // advises the sink while its field already has key focus) —
                 // a blocking lock self-deadlocks and froze the secure desktop.
-                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        globals::log_error(&format!("key sink OnSetFocus fForeground={}", fforeground.as_bool()));
-                }
+                // Log every call — focus revocations are the signal we're
+                // hunting for in the game-key-delivery investigation.
+                globals::log_error(&format!("key sink OnSetFocus fForeground={}", fforeground.as_bool()));
                 Ok(())
         }
 
@@ -532,6 +531,10 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
 
         fn OnTestKeyUp(&self, _pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
                 globals::guarded("OnTestKeyUp", || {
+                        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                globals::log_error(&format!("first test-key-up vk=0x{:02x}", wparam.0));
+                        }
                         globals::update_modifiers(wparam.0, lparam.0);
                         Ok(BOOL(0))
                 })
@@ -539,6 +542,10 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
 
         fn OnKeyDown(&self, pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
                 globals::guarded("OnKeyDown", || {
+                        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                globals::log_error(&format!("first key-down vk=0x{:02x}", wparam.0));
+                        }
                         let Some(mut state) = self.try_lock() else { return Ok(BOOL(0)) };
                         let Some(context) = pic.as_ref() else { return Ok(BOOL(0)) };
                         let context = context.clone();
@@ -571,6 +578,10 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
 
         fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
                 globals::guarded("OnKeyUp", || {
+                        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                globals::log_error(&format!("first key-up vk=0x{:02x}", wparam.0));
+                        }
                         globals::update_modifiers(wparam.0, lparam.0);
                         Ok(BOOL(0))
                 })
@@ -578,6 +589,10 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
 
         fn OnPreservedKey(&self, _pic: Ref<'_, ITfContext>, rguid: *const GUID) -> Result<BOOL> {
                 globals::guarded("OnPreservedKey", || {
+                        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                globals::log_error("first preserved-key callback");
+                        }
                         if rguid.is_null() {
                                 return Ok(BOOL(0));
                         }
@@ -648,10 +663,13 @@ impl ITfCompositionSink_Impl for RCantoneseService_Impl {
 impl ITfActiveLanguageProfileNotifySink_Impl for RCantoneseService_Impl {
         fn OnActivated(&self, clsid: *const GUID, _guidprofile: *const GUID, factivated: BOOL) -> Result<()> {
                 globals::guarded("OnActivated", || {
-                        unsafe {
-                                if *clsid != globals::CLSID_RCANTONESE {
-                                        return Ok(());
-                                }
+                        let ours = unsafe { *clsid == globals::CLSID_RCANTONESE };
+                        // Log every profile switch on this thread — a game that
+                        // forces its own layout deactivates our profile, which
+                        // stops keystroke offers entirely.
+                        globals::log_error(&format!("profile OnActivated ours={ours} active={}", factivated.as_bool()));
+                        if !ours {
+                                return Ok(());
                         }
 
                         let Some(state) = self.try_lock() else { return Ok(()) };
