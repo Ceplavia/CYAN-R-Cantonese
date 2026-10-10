@@ -425,10 +425,14 @@ impl ITfThreadMgrEventSink_Impl for RCantoneseService_Impl {
                         // Update the language bar to reflect the open/close compartment.
                         if let Some(processor) = state.processor.as_ref() {
                                 let _ = pdimprevfocus;
-                                processor
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .update_language_bar(state.thread_mgr.as_ref(), state.client_id, focus.is_some());
+                                let mut p = processor.lock().unwrap_or_else(|e| e.into_inner());
+                                // Settings changed on disk since we loaded (e.g.
+                                // toggled from another process) — adopt them so a
+                                // long-lived app can't drift from the saved mode.
+                                if let Some(tm) = state.thread_mgr.as_ref() {
+                                        p.sync_settings_if_changed(tm);
+                                }
+                                p.update_language_bar(state.thread_mgr.as_ref(), state.client_id, focus.is_some());
                         }
                         state.doc_mgr_last_focused = focus;
                         Ok(())

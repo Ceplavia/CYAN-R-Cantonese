@@ -110,6 +110,15 @@ pub struct Processor {
 
         is_applying_settings: bool,
         is_mirroring_conversion: bool,
+        /// mtime of settings.toml when `settings` was last loaded — lets
+        /// long-lived processes notice another process's save.
+        settings_mtime: Option<std::time::SystemTime>,
+}
+
+fn current_settings_mtime() -> Option<std::time::SystemTime> {
+        std::fs::metadata(crate::config::settings_path())
+                .and_then(|m| m.modified())
+                .ok()
 }
 
 impl Processor {
@@ -137,6 +146,7 @@ impl Processor {
                         selected_memory: Vec::new(),
                         is_applying_settings: false,
                         is_mirroring_conversion: false,
+                        settings_mtime: current_settings_mtime(),
                 };
 
                 let _thread_unknown: IUnknown = thread_mgr.cast().ok()?;
@@ -814,6 +824,31 @@ impl Processor {
                 let _ = form.set_bool(full_width_from_form(self.settings.character_form));
                 let punct = Compartment::new(&thread_unknown, self.client_id, globals::GUID_COMPARTMENT_PUNCTUATION_FORM);
                 let _ = punct.set_bool(cantonese_punctuation_from_form(self.settings.punctuation_form));
+        }
+
+        /// Reload settings.toml when another process rewrote it. Settings are
+        /// a per-process copy — without this, a process activated days ago
+        /// (e.g. a long-lived IDE window) keeps stale values forever and the
+        /// settings menu lies about what's actually persisted.
+        pub fn sync_settings_if_changed(&mut self, thread_mgr: &ITfThreadMgr) {
+                let mtime = current_settings_mtime();
+                if mtime == self.settings_mtime {
+                        return;
+                }
+                self.settings_mtime = mtime;
+                self.apply_persisted_settings(thread_mgr);
+        }
+
+        /// Field-level reload for display paths (menu snapshot) — skips
+        /// compartment work.
+        pub fn sync_settings_fields(&mut self) {
+                let mtime = current_settings_mtime();
+                if mtime == self.settings_mtime {
+                        return;
+                }
+                self.settings_mtime = mtime;
+                self.settings = load_settings();
+                self.keys.set_candidate_list_range(self.settings.candidate_page_size);
         }
 
         pub fn apply_persisted_settings(&mut self, thread_mgr: &ITfThreadMgr) {

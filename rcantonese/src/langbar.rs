@@ -717,10 +717,13 @@ impl ITfLangBarItemButton_Impl for LangBarItem_Impl {
                         let Some(processor) = weak.upgrade() else { return Ok(()) };
                         // try_lock — a blocking wait here hangs the shell's UI
                         // thread (explorer) when another thread holds the lock.
-                        let Ok(processor) = processor.try_lock() else {
+                        let Ok(mut processor) = processor.try_lock() else {
                                 crate::globals::log("InitMenu: try_lock failed");
                                 return Ok(());
                         };
+                        // Re-read settings.toml — this process's copy may be
+                        // stale if another process saved after we activated.
+                        processor.sync_settings_fields();
                         let snapshot = build_menu_snapshot(&processor);
                         drop(processor);
                         crate::globals::log(&format!("InitMenu: adding {} items", snapshot.len()));
@@ -874,7 +877,10 @@ fn build_popup(menu: windows::Win32::UI::WindowsAndMessaging::HMENU, items: &[Me
 pub fn show_settings_menu_at(pt: POINT, processor: &std::sync::Arc<Mutex<Processor>>) {
         crate::globals::log(&format!("show_settings_menu_at pt=({},{})", pt.x, pt.y));
         let snapshot = match processor.try_lock() {
-                Ok(p) => build_menu_snapshot(&p),
+                Ok(mut p) => {
+                        p.sync_settings_fields();
+                        build_menu_snapshot(&p)
+                }
                 Err(_) => {
                         crate::globals::log("show_settings_menu_at: try_lock failed");
                         return;
