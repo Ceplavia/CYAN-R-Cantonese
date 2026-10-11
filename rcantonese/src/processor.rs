@@ -121,6 +121,17 @@ fn current_settings_mtime() -> Option<std::time::SystemTime> {
                 .ok()
 }
 
+/// Save settings without leaking the runtime character variant:
+/// toml's `character_variant` is only the *default* a new window starts
+/// with (edited via the config center). A menu/preserved-key toggle in
+/// this process is per-window state — writing it back would silently
+/// change every other window too.
+fn persisted_settings(settings: &ImeSettings) -> ImeSettings {
+        let mut to_save = settings.clone();
+        to_save.character_variant = crate::config::load().character_variant;
+        to_save
+}
+
 impl Processor {
         /// Port of CCompositionProcessorEngine::SetupLanguageProfile.
         pub fn new(thread_mgr: &ITfThreadMgr, client_id: u32) -> Option<Self> {
@@ -319,7 +330,7 @@ impl Processor {
                         }
                         let form = character_form_from_full_width(!full);
                         self.settings.character_form = form;
-                        save_settings(&self.settings);
+                        save_settings(&persisted_settings(&self.settings));
                         return true;
                 }
                 if *guid == globals::GUID_PRESERVEDKEY_PUNCTUATION_FORM {
@@ -333,7 +344,7 @@ impl Processor {
                         }
                         let form = punctuation_form_from_cantonese(!cantonese);
                         self.settings.punctuation_form = form;
-                        save_settings(&self.settings);
+                        save_settings(&persisted_settings(&self.settings));
                         return true;
                 }
                 if *guid == globals::GUID_PRESERVEDKEY_VARIANT_TRADITIONAL {
@@ -383,7 +394,7 @@ impl Processor {
                 compartment.set_bool(!open)?;
                 let mode = input_method_mode_from_open(!open);
                 self.settings.input_method_mode = mode;
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
                 Ok(())
         }
 
@@ -391,7 +402,7 @@ impl Processor {
                 let compartment = Compartment::new(&thread_mgr.cast::<IUnknown>().unwrap(), self.client_id, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE);
                 compartment.set_bool(keyboard_open_from_mode(mode))?;
                 self.settings.input_method_mode = mode;
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
                 Ok(())
         }
 
@@ -747,7 +758,9 @@ impl Processor {
                         return false;
                 }
                 self.settings.character_variant = variant;
-                save_settings(&self.settings);
+                // Deliberately NOT persisted — the variant is per-window
+                // runtime state (like the 中/A mode toggle). toml's value
+                // is only the default a new window starts from.
                 self.cached_input_text.clear();
                 self.cached_suggestions.clear();
                 true
@@ -760,7 +773,7 @@ impl Processor {
                 }
                 self.settings.candidate_page_size = normalized;
                 self.keys.set_candidate_list_range(normalized);
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
                 true
         }
 
@@ -773,7 +786,7 @@ impl Processor {
                         return;
                 }
                 self.settings.punctuation_form = form;
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
         }
 
         pub fn set_character_form(&mut self, form: CharacterForm, thread_mgr: &ITfThreadMgr) {
@@ -785,7 +798,7 @@ impl Processor {
                         return;
                 }
                 self.settings.character_form = form;
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
         }
 
         pub fn set_candidate_font_size(&mut self, size: u32) -> bool {
@@ -794,7 +807,7 @@ impl Processor {
                         return false;
                 }
                 self.settings.candidate_font_size = normalized;
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
                 true
         }
         pub fn set_candidate_number_font_size(&mut self, size: u32) -> bool {
@@ -803,7 +816,7 @@ impl Processor {
                         return false;
                 }
                 self.settings.candidate_number_font_size = normalized;
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
                 true
         }
         pub fn set_candidate_comment_font_size(&mut self, size: u32) -> bool {
@@ -812,7 +825,7 @@ impl Processor {
                         return false;
                 }
                 self.settings.candidate_comment_font_size = normalized;
-                save_settings(&self.settings);
+                save_settings(&persisted_settings(&self.settings));
                 true
         }
 
@@ -830,6 +843,8 @@ impl Processor {
         /// a per-process copy — without this, a process activated days ago
         /// (e.g. a long-lived IDE window) keeps stale values forever and the
         /// settings menu lies about what's actually persisted.
+        /// The character variant is per-window runtime state — it survives
+        /// the reload (a new window reads the toml default at activation).
         pub fn sync_settings_if_changed(&mut self, thread_mgr: &ITfThreadMgr) {
                 let mtime = current_settings_mtime();
                 if mtime == self.settings_mtime {
@@ -847,12 +862,16 @@ impl Processor {
                         return;
                 }
                 self.settings_mtime = mtime;
+                let variant = self.settings.character_variant;
                 self.settings = load_settings();
+                self.settings.character_variant = variant;
                 self.keys.set_candidate_list_range(self.settings.candidate_page_size);
         }
 
         pub fn apply_persisted_settings(&mut self, thread_mgr: &ITfThreadMgr) {
+                let variant = self.settings.character_variant;
                 self.settings = load_settings();
+                self.settings.character_variant = variant;
                 self.keys.set_candidate_list_range(self.settings.candidate_page_size);
                 self.is_applying_settings = true;
                 self.apply_settings_to_compartments(thread_mgr);
@@ -970,7 +989,7 @@ impl Processor {
                 if let Ok(open) = compartment.get_bool() {
                         let mode = input_method_mode_from_open(open);
                         self.settings.input_method_mode = mode;
-                        save_settings(&self.settings);
+                        save_settings(&persisted_settings(&self.settings));
                 }
         }
         fn persist_character_form(&mut self, thread_mgr: &ITfThreadMgr) {
@@ -978,7 +997,7 @@ impl Processor {
                 if let Ok(full) = compartment.get_bool() {
                         let form = character_form_from_full_width(full);
                         self.settings.character_form = form;
-                        save_settings(&self.settings);
+                        save_settings(&persisted_settings(&self.settings));
                 }
         }
         fn persist_punctuation_form(&mut self, thread_mgr: &ITfThreadMgr) {
@@ -986,7 +1005,7 @@ impl Processor {
                 if let Ok(cantonese) = compartment.get_bool() {
                         let form = punctuation_form_from_cantonese(cantonese);
                         self.settings.punctuation_form = form;
-                        save_settings(&self.settings);
+                        save_settings(&persisted_settings(&self.settings));
                 }
         }
 
