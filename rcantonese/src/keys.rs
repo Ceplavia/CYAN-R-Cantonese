@@ -102,6 +102,19 @@ pub(crate) fn convert_virtual_key(wparam: usize, lparam: isize) -> (u32, u16) {
         (code, 0)
 }
 
+/// Log the first alphanumeric passthrough per process — tells apart "keys
+/// arrive but we drop them" (closed/disabled) from "keys never offered".
+fn log_passthrough_once(reason: &str, code: u32) {
+        // Only alphanumerics — modifiers/hotkeys pass through legitimately.
+        if !(0x30..=0x5a).contains(&code) && !(0x60..=0x6f).contains(&code) {
+                return;
+        }
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                globals::log_error(&format!("passthrough {reason} vk=0x{code:02x}"));
+        }
+}
+
 /// Port of _TestKeyDown — returns Some(state, code, wch) when the key will be eaten.
 pub fn test_key(
         state: &mut ServiceState,
@@ -142,6 +155,7 @@ pub fn test_key(
                 return None;
         }
         if is_keyboard_disabled(state) {
+                log_passthrough_once("disabled", code);
                 return None;
         }
         if !is_key_down {
@@ -202,6 +216,7 @@ pub fn test_key(
         }
         if !is_keyboard_open(state) {
                 // ABC mode — let everything through
+                log_passthrough_once("closed", code);
                 state.composition_reading_code.clear();
                 return None;
         }
