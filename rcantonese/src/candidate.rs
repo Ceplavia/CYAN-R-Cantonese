@@ -757,6 +757,11 @@ impl CandidateListPresenter {
                                         self.bridge_detected.store(true, Ordering::Relaxed);
                                         return true;
                                 }
+                                // A real rect means the earlier degenerate read
+                                // was transient (fresh text field not laid out
+                                // yet — AutoCAD/Qt hit this on the first
+                                // composition per field) — not a bridge host.
+                                self.bridge_detected.store(false, Ordering::Relaxed);
                                 let (width, height) = {
                                         let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
                                         (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)
@@ -784,6 +789,7 @@ impl CandidateListPresenter {
                                         bridge_detected.store(true, Ordering::Relaxed);
                                         return Ok(());
                                 }
+                                bridge_detected.store(false, Ordering::Relaxed);
                                 let (width, height) = {
                                         let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
                                         (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)

@@ -349,6 +349,34 @@ pub fn modifiers_value() -> u32 {
         MODIFIERS_VALUE.load(Ordering::Relaxed)
 }
 
+/// Live modifier check for the preserved-key path — the *_ONLY atomics are
+/// updated inside our key handlers, which preserved-key delivery can bypass
+/// (msctf routes Shift straight to OnPreservedKey in some hosts — the atomics
+/// then hold stale values and the toggle gets rejected: "Shift 冇反應" in Word).
+/// Ask the OS directly instead.
+fn vk_down(vk: i32) -> bool {
+        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) as u16 & 0x8000 != 0 }
+}
+
+fn only_down(self_vk: i32, others: &[i32]) -> bool {
+        vk_down(self_vk) && !others.iter().any(|&k| vk_down(k))
+}
+
+pub fn shift_key_down_only_now() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT};
+        only_down(i32::from(VK_SHIFT.0), &[i32::from(VK_CONTROL.0), i32::from(VK_MENU.0), i32::from(VK_LWIN.0), i32::from(VK_RWIN.0)])
+}
+
+pub fn control_key_down_only_now() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT};
+        only_down(i32::from(VK_CONTROL.0), &[i32::from(VK_SHIFT.0), i32::from(VK_MENU.0), i32::from(VK_LWIN.0), i32::from(VK_RWIN.0)])
+}
+
+pub fn alt_key_down_only_now() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT};
+        only_down(i32::from(VK_MENU.0), &[i32::from(VK_SHIFT.0), i32::from(VK_CONTROL.0), i32::from(VK_LWIN.0), i32::from(VK_RWIN.0)])
+}
+
 /// Port of CheckModifiers.
 pub fn check_modifiers(mod_current: u32, mod_expected: u32) -> bool {
         let expected = mod_expected & !TF_MOD_ON_KEYUP;

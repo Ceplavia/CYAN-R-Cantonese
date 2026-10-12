@@ -121,14 +121,16 @@ fn current_settings_mtime() -> Option<std::time::SystemTime> {
                 .ok()
 }
 
-/// Save settings without leaking the runtime character variant:
-/// toml's `character_variant` is only the *default* a new window starts
-/// with (edited via the config center). A menu/preserved-key toggle in
-/// this process is per-window state — writing it back would silently
+/// Save settings without leaking per-window runtime state:
+/// toml's `character_variant`/`input_method_mode` are only the *defaults* a
+/// new window starts with (edited via the config center). A menu/preserved-key
+/// toggle in this process is per-window state — writing it back would silently
 /// change every other window too.
 fn persisted_settings(settings: &ImeSettings) -> ImeSettings {
         let mut to_save = settings.clone();
-        to_save.character_variant = crate::config::load().character_variant;
+        let on_disk = crate::config::load();
+        to_save.character_variant = on_disk.character_variant;
+        to_save.input_method_mode = on_disk.input_method_mode;
         to_save
 }
 
@@ -271,13 +273,13 @@ impl Processor {
                         }
                         let modifiers = key.modifiers | (if key.guid == globals::GUID_PRESERVEDKEY_INPUT_MODE { 0x00010000 } else { 0 });
                         if modifiers & MASK != 0 {
-                                if modifiers & 0x00010000 != 0 && !globals::IS_SHIFT_KEY_DOWN_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+                                if modifiers & 0x00010000 != 0 && !globals::shift_key_down_only_now() {
                                         return false;
                                 }
-                                if modifiers & 0x00020000 != 0 && !globals::IS_CONTROL_KEY_DOWN_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+                                if modifiers & 0x00020000 != 0 && !globals::control_key_down_only_now() {
                                         return false;
                                 }
-                                if modifiers & 0x00040000 != 0 && !globals::IS_ALT_KEY_DOWN_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+                                if modifiers & 0x00040000 != 0 && !globals::alt_key_down_only_now() {
                                         return false;
                                 }
                         }
@@ -863,15 +865,19 @@ impl Processor {
                 }
                 self.settings_mtime = mtime;
                 let variant = self.settings.character_variant;
+                let mode = self.settings.input_method_mode;
                 self.settings = load_settings();
                 self.settings.character_variant = variant;
+                self.settings.input_method_mode = mode;
                 self.keys.set_candidate_list_range(self.settings.candidate_page_size);
         }
 
         pub fn apply_persisted_settings(&mut self, thread_mgr: &ITfThreadMgr) {
                 let variant = self.settings.character_variant;
+                let mode = self.settings.input_method_mode;
                 self.settings = load_settings();
                 self.settings.character_variant = variant;
+                self.settings.input_method_mode = mode;
                 self.keys.set_candidate_list_range(self.settings.candidate_page_size);
                 self.is_applying_settings = true;
                 self.apply_settings_to_compartments(thread_mgr);
