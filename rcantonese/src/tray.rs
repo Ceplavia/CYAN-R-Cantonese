@@ -325,8 +325,14 @@ fn find_tray_window() -> Option<HWND> {
                 }
         }
         // Stale in-process workers: tell them to quit — they can never host
-        // the icon properly and they shadow the real tray window.
+        // the icon properly and they shadow the real tray window. Once per
+        // hwnd: a worker that can't die (packaged hosts can't even OpenProcess
+        // it) would otherwise be re-logged and re-posted on every call.
+        static STALE_QUIT_POSTED: Mutex<std::collections::BTreeSet<isize>> = Mutex::new(std::collections::BTreeSet::new());
         for w in stale {
+                if !STALE_QUIT_POSTED.lock().unwrap_or_else(|e| e.into_inner()).insert(w.0 as isize) {
+                        continue;
+                }
                 let mut pid = 0u32;
                 unsafe {
                         GetWindowThreadProcessId(w, Some(&mut pid));
@@ -348,6 +354,12 @@ fn show_tray_icon() {
                 post_to_tray(WM_TRAY_SHOW, WPARAM(my_pid as usize), LPARAM(0));
                 let is_zh = TRAY.lock().unwrap_or_else(|e| e.into_inner()).shown_mode_is_zh;
                 post_to_tray(WM_TRAY_SETMODE, WPARAM(is_zh as usize), LPARAM(0));
+                return;
+        }
+        // One spawn attempt per process — packaged hosts (appcontainer) can
+        // never CreateProcess, so retrying on every focus churned the log.
+        static SPAWN_ATTEMPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if SPAWN_ATTEMPTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 return;
         }
         std::thread::spawn(move || {
