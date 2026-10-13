@@ -349,32 +349,20 @@ pub fn modifiers_value() -> u32 {
         MODIFIERS_VALUE.load(Ordering::Relaxed)
 }
 
-/// Live modifier check for the preserved-key path — the *_ONLY atomics are
-/// updated inside our key handlers, which preserved-key delivery can bypass
-/// (msctf routes Shift straight to OnPreservedKey in some hosts — the atomics
-/// then hold stale values and the toggle gets rejected: "Shift 冇反應" in Word).
-/// Ask the OS directly instead.
+/// Live modifier check for the preserved-key path. ON_KEYUP preserved keys
+/// (the Shift mode toggle) fire at key *release* — the atomics can't be
+/// trusted because in some hosts the key-down never reaches our handlers
+/// either (Word), and a live "is Shift down" read is false by definition at
+/// that instant. What we actually want: no *other* modifier still held —
+/// releasing Shift during a Ctrl+Shift+X chord must not toggle the mode.
 fn vk_down(vk: i32) -> bool {
         unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) as u16 & 0x8000 != 0 }
 }
 
-fn only_down(self_vk: i32, others: &[i32]) -> bool {
-        vk_down(self_vk) && !others.iter().any(|&k| vk_down(k))
-}
-
-pub fn shift_key_down_only_now() -> bool {
+/// True when Shift, Ctrl, Alt and Win are all currently released.
+pub fn no_modifier_held() -> bool {
         use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT};
-        only_down(i32::from(VK_SHIFT.0), &[i32::from(VK_CONTROL.0), i32::from(VK_MENU.0), i32::from(VK_LWIN.0), i32::from(VK_RWIN.0)])
-}
-
-pub fn control_key_down_only_now() -> bool {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT};
-        only_down(i32::from(VK_CONTROL.0), &[i32::from(VK_SHIFT.0), i32::from(VK_MENU.0), i32::from(VK_LWIN.0), i32::from(VK_RWIN.0)])
-}
-
-pub fn alt_key_down_only_now() -> bool {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT};
-        only_down(i32::from(VK_MENU.0), &[i32::from(VK_SHIFT.0), i32::from(VK_CONTROL.0), i32::from(VK_LWIN.0), i32::from(VK_RWIN.0)])
+        ![VK_SHIFT.0, VK_CONTROL.0, VK_MENU.0, VK_LWIN.0, VK_RWIN.0].iter().any(|&k| vk_down(i32::from(k)))
 }
 
 /// Port of CheckModifiers.

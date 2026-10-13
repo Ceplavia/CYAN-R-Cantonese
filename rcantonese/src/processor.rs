@@ -271,17 +271,15 @@ impl Processor {
                         if key.guid != *guid {
                                 continue;
                         }
+                        // ON_KEYUP preserved keys fire at key *release* — the
+                        // key itself is already up, so what "shift only" really
+                        // means is no OTHER modifier is still held. Asking the
+                        // OS live also fixes hosts where the key-down never
+                        // reached our handlers (Word) and the *_ONLY atomics
+                        // were stale-false forever.
                         let modifiers = key.modifiers | (if key.guid == globals::GUID_PRESERVEDKEY_INPUT_MODE { 0x00010000 } else { 0 });
-                        if modifiers & MASK != 0 {
-                                if modifiers & 0x00010000 != 0 && !globals::shift_key_down_only_now() {
-                                        return false;
-                                }
-                                if modifiers & 0x00020000 != 0 && !globals::control_key_down_only_now() {
-                                        return false;
-                                }
-                                if modifiers & 0x00040000 != 0 && !globals::alt_key_down_only_now() {
-                                        return false;
-                                }
+                        if modifiers & MASK != 0 && !globals::no_modifier_held() {
+                                return false;
                         }
                 }
                 true
