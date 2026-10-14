@@ -219,7 +219,14 @@ impl Processor {
                 };
                 use crate::strings::*;
                 self.preserved_keys = vec![
-                        key(globals::GUID_PRESERVEDKEY_INPUT_MODE, 0x10, globals::TF_MOD_ON_KEYUP_SHIFT_ONLY, IDS_DESC_INPUT_MODE_TOGGLE),
+                        // Shift is intentionally NOT a preserved key —
+                        // same as weasel (its PreserveKey(VK_SHIFT) is #if 0'd
+                        // out). msctf's ON_KEYUP preserved dispatch also fires
+                        // when Shift is released inside a chord (Shift+",
+                        // Ctrl+Shift+Del), toggling the mode and committing
+                        // half-typed input. The toggle lives on the normal key
+                        // path instead — SHIFT_PRESS_CLEAN tracked in
+                        // update_modifiers, consumed in OnTestKeyUp.
                         // Shift+Space is intentionally NOT a preserved key: it must
                         // reach the app as a plain space (users expect Shift+Space to
                         // type a space). Half/full-width toggling is still available

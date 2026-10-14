@@ -258,6 +258,12 @@ pub static MODIFIERS_VALUE: AtomicU32 = AtomicU32::new(0);
 pub static IS_SHIFT_KEY_DOWN_ONLY: AtomicBool = AtomicBool::new(false);
 pub static IS_CONTROL_KEY_DOWN_ONLY: AtomicBool = AtomicBool::new(false);
 pub static IS_ALT_KEY_DOWN_ONLY: AtomicBool = AtomicBool::new(false);
+/// Whether the in-progress Shift press is clean — set at Shift-down when no
+/// other modifier is held, cleared when any other key lands during the hold.
+/// The 中/英 toggle consumes it at Shift key-up (weasel-style: Shift is not a
+/// preserved key — msctf's ON_KEYUP dispatch fires on chords like Shift+"
+/// and Ctrl+Shift+Del too, it can't see what happened during the press).
+pub static SHIFT_PRESS_CLEAN: AtomicBool = AtomicBool::new(false);
 
 fn key_down(vkey: u32) -> bool {
         unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(vkey as i32) as u16 & 0x8000 != 0 }
@@ -271,6 +277,17 @@ pub fn update_modifiers(wparam: usize, lparam: isize) {
         let menu_down = key_down(VK_MENU);
         let ctrl_down = key_down(VK_CONTROL);
         let shift_down = key_down(VK_SHIFT);
+
+        // Shift press-cycle tracking for the mode toggle — see SHIFT_PRESS_CLEAN.
+        let event_vk = wparam & 0xff;
+        if matches!(event_vk, 0x10 | 0xa0 | 0xa1) {
+                if shift_down {
+                        let win_down = key_down(0x5b) || key_down(0x5c);
+                        SHIFT_PRESS_CLEAN.store(!(menu_down || ctrl_down || win_down), Ordering::Relaxed);
+                }
+        } else if key_down(event_vk as u32) && shift_down {
+                SHIFT_PRESS_CLEAN.store(false, Ordering::Relaxed);
+        }
 
         let mut modifiers = MODIFIERS_VALUE.load(Ordering::Relaxed);
         let mut shift_only = false;
