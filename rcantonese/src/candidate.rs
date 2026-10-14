@@ -510,12 +510,18 @@ impl CandidateListPresenter {
 
         /// Deferred tail of start() — runs on the UI thread via the refresh
         /// window, after the edit session released the document lock.
-        /// `pbShow` from BeginUIElement is advisory only — we draw our own
-        /// window regardless: apps that report true (Chromium) rely on the
-        /// framework's candidate UI which never actually renders for our
-        /// element, so honoring it produced no window at all (0.9.3).
+        /// `pbShow` from BeginUIElement is advisory — apps that report true
+        /// (Chromium) rely on the framework's candidate UI which never
+        /// actually renders for our element, so honoring it produced no
+        /// window at all (0.9.3). Exception: system-app hosts (anything under
+        /// %SystemRoot%\SystemApps — SearchHost, TextInputHost,
+        /// StartMenuExperienceHost) DO render our element through the
+        /// immersive candidate UI, and their custom canvas also reports a
+        /// degenerate GetTextExt rect which trips bridge detection — trusting
+        /// pbShow there is the only path that draws anything (Start menu).
         pub fn deferred_begin(this: &ComObject<CandidateListPresenter>) {
                 let presenter = this.get();
+                let mut host_draws = false;
                 if let Some(ui_mgr) = presenter.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                         let element: ITfUIElement = this.to_interface();
                         let mut show = BOOL(0);
@@ -528,13 +534,20 @@ impl CandidateListPresenter {
                                         return;
                                 }
                         }
-                        globals::log(&format!("BeginUIElement ok: show={} id={id}", show.as_bool()));
+                        static LOGGED: AtomicBool = AtomicBool::new(false);
+                        if !LOGGED.swap(true, Ordering::Relaxed) {
+                                globals::log_error(&format!("BeginUIElement ok: show={} id={id} systemapp={}", show.as_bool(), is_system_apps_process()));
+                        }
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
+                        host_draws = show.as_bool() && is_system_apps_process();
                         if !show.as_bool() {
                                 presenter.updated_flags.store(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
                         }
                 }
                 presenter.is_show_mode.store(true, Ordering::Relaxed);
+                if host_draws {
+                        return;
+                }
                 match CandidateWindow::create(HWND::default(), presenter.page_size, presenter.window_state.clone()) {
                         Some(window) => {
                                 globals::log("candidate window created");
@@ -755,6 +768,10 @@ impl CandidateListPresenter {
                                 // be zero — a collapsed caret has left==right.
                                 if rect.top == rect.bottom {
                                         self.bridge_detected.store(true, Ordering::Relaxed);
+                                        static BRIDGE_LOGGED: AtomicBool = AtomicBool::new(false);
+                                        if !BRIDGE_LOGGED.swap(true, Ordering::Relaxed) {
+                                                globals::log_error(&format!("bridge detected: zero-height text-ext rect=({},{}..{},{})", rect.left, rect.top, rect.right, rect.bottom));
+                                        }
                                         return true;
                                 }
                                 // A real rect means the earlier degenerate read
@@ -907,6 +924,21 @@ impl CandidateListPresenter {
 // and the per-thread refresh window replays them once the session ends —
 // the same deferral the langbar compartment sink already uses.
 // ---------------------------------------------------------------------
+
+/// True when the host process is a modern system shell under
+/// %SystemRoot%\SystemApps (SearchHost, TextInputHost,
+/// StartMenuExperienceHost). Those genuinely render our UI element through
+/// the immersive candidate UI when BeginUIElement reports pbShow=true —
+/// unlike Chromium's sink which claims the same but never draws (0.9.3).
+fn is_system_apps_process() -> bool {
+        use std::sync::OnceLock;
+        static IS: OnceLock<bool> = OnceLock::new();
+        *IS.get_or_init(|| {
+                let mut buf = [0u16; 260];
+                let n = unsafe { windows::Win32::System::LibraryLoader::GetModuleFileNameW(None, &mut buf) } as usize;
+                String::from_utf16_lossy(&buf[..n]).to_lowercase().starts_with("c:\\windows\\systemapps\\")
+        })
+}
 
 const DEFER_BEGIN: u8 = 0;
 const DEFER_UPDATE: u8 = 1;
