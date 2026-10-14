@@ -290,6 +290,16 @@ impl CoreImeEngine {
                         globals::log("engine::prepare skipped (RCANTONESE_SKIP_ENGINE)");
                         return None;
                 }
+                // Warm the OS page cache off the activation path: a second
+                // read-only connection walks the hot tables in the
+                // background, so the first keystroke's B-tree walk hits RAM
+                // even on a cold boot / busy disk.
+                std::thread::spawn(|| {
+                        let Some(db) = ImeDatabase::open_default() else { return };
+                        db.execute("SELECT COUNT(*) FROM lexicon_core");
+                        db.execute("SELECT COUNT(*) FROM syllable_core_table");
+                        globals::log("engine: warm-up done");
+                });
                 Self::prepare_with(database)
         }
 

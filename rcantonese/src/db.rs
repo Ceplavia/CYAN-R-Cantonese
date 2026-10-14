@@ -228,7 +228,15 @@ impl ImeDatabase {
                         }
                         return None;
                 }
-                Some(Self { raw })
+                let db = Self { raw };
+                // Memory-map the file: reads become page faults served by the
+                // shared OS page cache instead of read() syscalls. Hot index
+                // pages stay resident across processes, so a busy disk
+                // (Windows Update churning the cache) can't stall the
+                // keystroke path with cold reads.
+                db.execute("PRAGMA mmap_size=268435456");
+                db.execute("PRAGMA temp_store=MEMORY");
+                Some(db)
         }
 
         pub fn open_default() -> Option<Self> {
