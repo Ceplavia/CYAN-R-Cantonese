@@ -536,53 +536,7 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                                 globals::log_error(&format!("first test-key-up vk=0x{:02x}", wparam.0));
                         }
                         globals::update_modifiers(wparam.0, lparam.0);
-                        // Weasel-style Shift toggle on the normal key path —
-                        // Shift is NOT a preserved key (see Processor
-                        // preserved-keys): msctf's ON_KEYUP dispatch also fired
-                        // on chords like Shift+" and Ctrl+Shift+Del, toggling
-                        // the mode and committing half-typed input. Track the
-                        // press cycle ourselves: a clean release flips the
-                        // open/close compartment; the key itself always passes
-                        // through to the app.
-                        let vk = (wparam.0 & 0xff) as u32;
-                        if !matches!(vk, 0x10 | 0xa0 | 0xa1)
-                                || !globals::SHIFT_PRESS_CLEAN.swap(false, std::sync::atomic::Ordering::Relaxed)
-                                || crate::keys::caps_lock_on()
-                        {
-                                return Ok(BOOL(0));
-                        }
-                        let Some(state) = self.try_lock() else { return Ok(BOOL(0)) };
-                        let (Some(processor), Some(thread_mgr)) = (state.processor.clone(), state.thread_mgr.clone()) else {
-                                return Ok(BOOL(0));
-                        };
-                        if crate::keys::is_keyboard_disabled(&state) {
-                                return Ok(BOOL(0));
-                        }
-                        let composing = state.is_composing();
-                        let finalize_args = (state.self_iunknown.clone(), state.context.clone(), state.client_id);
-                        drop(state);
-                        // Same pre-commit as the old preserved-key path: a mode
-                        // switch mid-composition would leave it dangling —
-                        // commit the raw buffer first (async, never block a
-                        // key dispatch).
-                        if composing {
-                                if let (Some(svc), Some(ctx), client_id) = finalize_args {
-                                        let _ = crate::composition::request_edit_session(
-                                                &svc,
-                                                &ctx,
-                                                client_id,
-                                                windows::Win32::UI::TextServices::TF_ES_ASYNCDONTCARE
-                                                        | windows::Win32::UI::TextServices::TF_ES_READWRITE,
-                                                Box::new(|state, ec, context| {
-                                                        crate::keys::handle_composition_finalize_raw(state, ec, context)
-                                                }),
-                                        );
-                                }
-                        }
-                        let _ = processor
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .toggle_input_method_mode(&thread_mgr);
+                        on_shift_key_up(self, wparam.0);
                         Ok(BOOL(0))
                 })
         }
@@ -630,6 +584,10 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                                 globals::log_error(&format!("first key-up vk=0x{:02x}", wparam.0));
                         }
                         globals::update_modifiers(wparam.0, lparam.0);
+                        // Some hosts (Chrome/QQ/Devin) dispatch key events
+                        // through OnKeyDown/OnKeyUp without the Test variants —
+                        // the toggle must live here too.
+                        on_shift_key_up(self, wparam.0);
                         Ok(BOOL(0))
                 })
         }
@@ -685,6 +643,55 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                         Ok(BOOL(eaten as i32))
                 })
         }
+}
+
+/// Weasel-style Shift mode toggle on the normal key path — Shift is NOT a
+/// preserved key (see Processor preserved-keys): msctf's ON_KEYUP dispatch
+/// also fired on chords like Shift+" and Ctrl+Shift+Del, toggling the mode
+/// and committing half-typed input. The press cycle is tracked in
+/// update_modifiers (SHIFT_PRESS_CLEAN); a clean release flips open/close.
+/// Called from BOTH OnTestKeyUp and OnKeyUp — hosts differ on which path a
+/// release takes, and the flag's one-shot consume makes double delivery
+/// idempotent. The Shift key itself always passes through to the app.
+fn on_shift_key_up(this: &RCantoneseService_Impl, wparam: usize) {
+        let vk = (wparam & 0xff) as u32;
+        if !matches!(vk, 0x10 | 0xa0 | 0xa1)
+                || !globals::SHIFT_PRESS_CLEAN.swap(false, std::sync::atomic::Ordering::Relaxed)
+                || crate::keys::caps_lock_on()
+        {
+                return;
+        }
+        let Some(state) = this.try_lock() else { return };
+        let (Some(processor), Some(thread_mgr)) = (state.processor.clone(), state.thread_mgr.clone()) else {
+                return;
+        };
+        if crate::keys::is_keyboard_disabled(&state) {
+                return;
+        }
+        let composing = state.is_composing();
+        let finalize_args = (state.self_iunknown.clone(), state.context.clone(), state.client_id);
+        drop(state);
+        // Same pre-commit as the old preserved-key path: a mode switch
+        // mid-composition would leave it dangling — commit the raw buffer
+        // first (async, never block a key dispatch).
+        if composing {
+                if let (Some(svc), Some(ctx), client_id) = finalize_args {
+                        let _ = crate::composition::request_edit_session(
+                                &svc,
+                                &ctx,
+                                client_id,
+                                windows::Win32::UI::TextServices::TF_ES_ASYNCDONTCARE
+                                        | windows::Win32::UI::TextServices::TF_ES_READWRITE,
+                                Box::new(|state, ec, context| {
+                                        crate::keys::handle_composition_finalize_raw(state, ec, context)
+                                }),
+                        );
+                }
+        }
+        let _ = processor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .toggle_input_method_mode(&thread_mgr);
 }
 
 // ---------------------------------------------------------------------
