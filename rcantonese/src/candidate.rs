@@ -539,7 +539,12 @@ impl CandidateListPresenter {
                                 globals::log_error(&format!("BeginUIElement ok: show={} id={id} systemapp={}", show.as_bool(), is_system_apps_process()));
                         }
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
-                        host_draws = show.as_bool() && is_system_apps_process();
+                        // pbShow=FALSE means a sink consumed the element and
+                        // will render it — trust that only for system-app
+                        // hosts (immersive candidate UI). For everything else
+                        // we draw our own window regardless (Chromium-class
+                        // sinks report states that never render — 0.9.3).
+                        host_draws = !show.as_bool() && is_system_apps_process();
                         if !show.as_bool() {
                                 presenter.updated_flags.store(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
                         }
@@ -853,10 +858,27 @@ impl CandidateListPresenter {
         /// Queue a UI op for post-session delivery — see DEFERRED_UI_OPS.
         fn defer_ui_op(&self, op: u8) {
                 let unk = self.self_unk.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(unk) = unk {
-                        DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, op)));
-                        crate::tray::post_deferred_ui();
+                let Some(unk) = unk else { return };
+                // System-app hosts (SearchHost/TextInputHost) may run the
+                // edit session on a thread that never pumps our message-only
+                // window — the AC log showed keys eaten but zero
+                // BeginUIElement, i.e. deferred ops starved. Weasel calls
+                // BeginUIElement inline everywhere; these hosts' sinks are
+                // MS-authored and safe to notify inside a session, so skip
+                // the deferral for them entirely.
+                if is_system_apps_process() {
+                        if let Ok(obj) = ComObject::<CandidateListPresenter>::cast_from(&unk) {
+                                match op {
+                                        DEFER_BEGIN => Self::deferred_begin(&obj),
+                                        DEFER_UPDATE => obj.get().do_update_ui_element(),
+                                        DEFER_END => obj.get().deferred_end(),
+                                        _ => {}
+                                }
+                        }
+                        return;
                 }
+                DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, op)));
+                crate::tray::post_deferred_ui();
         }
 
         /// UpdateUIElement synchronously calls the app's UIElement sink —
