@@ -385,7 +385,11 @@ fn register_candidate_class() -> u16 {
                         return 0;
                 }
                 // GCW_ATOM (-32). The value sits in the low 16 bits.
+                // The windows crate exports GetClassLongPtrW only on 64-bit.
+                #[cfg(target_pointer_width = "64")]
                 let atom = GetClassLongPtrW(hwnd, GET_CLASS_LONG_INDEX(-32)) as u16;
+                #[cfg(target_pointer_width = "32")]
+                let atom = GetClassLongW(hwnd, GET_CLASS_LONG_INDEX(-32)) as u16;
                 let _ = DestroyWindow(hwnd);
                 atom
         }
