@@ -4,11 +4,15 @@
 #![allow(dead_code)]
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::TextServices::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -219,31 +223,8 @@ struct CandidateWindow {
 }
 
 impl CandidateWindow {
-        fn register_class() -> Option<u16> {
-                let instance = globals::dll_instance();
-                if instance.0.is_null() {
-                        return None;
-                }
-                let mut class = WNDCLASSW::default();
-                unsafe {
-                        if GetClassInfoW(Some(instance), PCWSTR(CANDIDATE_CLASS.as_ptr()), &mut class).is_ok() {
-                                return Some(0);
-                        }
-                }
-                let wc = WNDCLASSW {
-                        hInstance: instance,
-                        lpszClassName: PCWSTR(CANDIDATE_CLASS.as_ptr()),
-                        lpfnWndProc: Some(candidate_wnd_proc),
-                        style: CS_VREDRAW | CS_HREDRAW,
-                        hbrBackground: unsafe { GetSysColorBrush(COLOR_WINDOW) },
-                        ..Default::default()
-                };
-                let atom = unsafe { RegisterClassW(&wc) };
-                if atom == 0 { None } else { Some(atom) }
-        }
-
         fn create(parent: HWND, page_size: usize, state: std::sync::Arc<Mutex<CandidateWindowState>>) -> Option<Self> {
-                Self::register_class()?;
+                candidate_class_atom()?;
                 {
                         // Initialize appearance from settings — the settings
                         // file may have been changed by the config center.
@@ -257,38 +238,18 @@ impl CandidateWindow {
                         state_guard.select_color = settings.candidate_select_color;
                         state_guard.comment_color = settings.candidate_comment_color;
                 }
-                let hwnd = unsafe {
-                        CreateWindowExW(
-                                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-                                PCWSTR(CANDIDATE_CLASS.as_ptr()),
-                                w!(""),
-                                WS_POPUP | WS_BORDER,
-                                0,
-                                0,
-                                10,
-                                10,
-                                Some(parent),
-                                None,
-                                Some(globals::dll_instance()),
-                                None,
-                        )
-                };
-                match hwnd {
-                        Ok(hwnd) if !hwnd.is_invalid() => {
-                                let window = Self { hwnd, state, page_size };
-                                // Give the wnd proc access to the shared state. One extra
-                                // strong ref is leaked intentionally — it is reclaimed
-                                // when the window is destroyed.
-                                let ptr = std::sync::Arc::into_raw(window.state.clone());
-                                unsafe {
-                                        // `as _`: SetWindowLongPtrW takes isize
-                                        // on x64 but i32 on x86.
-                                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as _);
-                                }
-                                Some(window)
-                        }
-                        _ => None,
+                let hwnd = create_candidate_hwnd(parent)?;
+                let window = Self { hwnd, state, page_size };
+                // Give the wnd proc access to the shared state. One extra
+                // strong ref is leaked intentionally — it is reclaimed
+                // when the window is destroyed.
+                let ptr = std::sync::Arc::into_raw(window.state.clone());
+                unsafe {
+                        // `as _`: SetWindowLongPtrW takes isize
+                        // on x64 but i32 on x86.
+                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as _);
                 }
+                Some(window)
         }
 
         fn show(&self, show: bool) {
@@ -334,6 +295,326 @@ impl Drop for CandidateWindow {
         }
 }
 
+// ---------------------------------------------------------------------
+// High z-order bands. Start menu, SearchHost and older UWP frames
+// (ApplicationFrameHost, WindowsApps such as Notes) live above
+// ZBID_DESKTOP. A normal WS_EX_TOPMOST popup is created in the desktop
+// band and is painted underneath those windows, so the candidate list
+// is invisible while Space still commits. CreateWindowInBand (user32,
+// same contract WindInput uses) puts the popup in the host's own band.
+// A zero-height GetTextExt on these hosts is a custom canvas with no
+// line box, not the CUAS/IMM bridge — hiding our window there leaves
+// nothing on screen.
+// ---------------------------------------------------------------------
+
+type CreateWindowInBandFn = unsafe extern "system" fn(
+        WINDOW_EX_STYLE,
+        u16,
+        PCWSTR,
+        WINDOW_STYLE,
+        i32,
+        i32,
+        i32,
+        i32,
+        HWND,
+        HMENU,
+        HINSTANCE,
+        *const core::ffi::c_void,
+        u32,
+) -> HWND;
+
+type GetWindowBandFn = unsafe extern "system" fn(HWND, *mut u32) -> BOOL;
+
+fn band_apis() -> Option<(CreateWindowInBandFn, GetWindowBandFn)> {
+        static APIS: OnceLock<Option<(CreateWindowInBandFn, GetWindowBandFn)>> = OnceLock::new();
+        *APIS.get_or_init(|| unsafe {
+                let user32 = GetModuleHandleW(w!("user32.dll")).ok()?;
+                let create = GetProcAddress(user32, s!("CreateWindowInBand"))?;
+                let get = GetProcAddress(user32, s!("GetWindowBand"))?;
+                Some((std::mem::transmute(create), std::mem::transmute(get)))
+        })
+}
+
+fn candidate_class_atom() -> Option<u16> {
+        static ATOM: OnceLock<u16> = OnceLock::new();
+        let atom = *ATOM.get_or_init(register_candidate_class);
+        if atom == 0 { None } else { Some(atom) }
+}
+
+fn register_candidate_class() -> u16 {
+        let instance = globals::dll_instance();
+        if instance.0.is_null() {
+                return 0;
+        }
+        let wc = WNDCLASSW {
+                hInstance: instance,
+                lpszClassName: PCWSTR(CANDIDATE_CLASS.as_ptr()),
+                lpfnWndProc: Some(candidate_wnd_proc),
+                style: CS_VREDRAW | CS_HREDRAW,
+                hbrBackground: unsafe { GetSysColorBrush(COLOR_WINDOW) },
+                ..Default::default()
+        };
+        let atom = unsafe { RegisterClassW(&wc) };
+        if atom != 0 {
+                return atom;
+        }
+        // The class can outlive a previous load of this DLL in the same
+        // process. CreateWindowInBand needs the atom; recover it from a
+        // throwaway window. 1410 = ERROR_CLASS_ALREADY_EXISTS.
+        unsafe {
+                if GetLastError().0 != 1410 {
+                        return 0;
+                }
+                let Ok(hwnd) = CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        PCWSTR(CANDIDATE_CLASS.as_ptr()),
+                        w!(""),
+                        WINDOW_STYLE(0),
+                        0,
+                        0,
+                        0,
+                        0,
+                        None,
+                        None,
+                        Some(instance),
+                        None,
+                ) else {
+                        return 0;
+                };
+                if hwnd.is_invalid() {
+                        return 0;
+                }
+                // GCW_ATOM (-32). The value sits in the low 16 bits.
+                let atom = GetClassLongPtrW(hwnd, GET_CLASS_LONG_INDEX(-32)) as u16;
+                let _ = DestroyWindow(hwnd);
+                atom
+        }
+}
+
+fn module_path_lower() -> &'static str {
+        static PATH: OnceLock<String> = OnceLock::new();
+        PATH.get_or_init(|| {
+                let mut buf = [0u16; 520];
+                let n = unsafe { windows::Win32::System::LibraryLoader::GetModuleFileNameW(None, &mut buf) } as usize;
+                String::from_utf16_lossy(&buf[..n]).to_lowercase()
+        })
+        .as_str()
+}
+
+/// Band of `preferred` (the text view's window) or, failing that, the
+/// foreground window — but only when that window belongs to this process.
+/// Owned popups stay above their owner, which is what puts the candidate
+/// list on top of the Start search panel. No window enumeration: that
+/// broadcasts into other wndprocs and can re-enter TSF mid-edit.
+fn host_band_and_owner(preferred: HWND) -> (u32, HWND) {
+        let Some((_, get_band)) = band_apis() else {
+                return (0, HWND::default());
+        };
+        unsafe {
+                let our_pid = GetCurrentProcessId();
+                let fg = GetForegroundWindow();
+                for hwnd in [preferred, fg] {
+                        if hwnd.is_invalid() {
+                                continue;
+                        }
+                        let mut pid = 0u32;
+                        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                        if pid != our_pid {
+                                continue;
+                        }
+                        let mut band = 0u32;
+                        if get_band(hwnd, &mut band).as_bool() && band > 1 {
+                                return (band, hwnd);
+                        }
+                }
+                (0, HWND::default())
+        }
+}
+
+/// Hosts whose text view has no Win32 line box (Start, Search, old UWP).
+/// A zero-height GetTextExt here must not be treated as the CUAS bridge.
+fn geometryless_host() -> bool {
+        static CACHED: AtomicU8 = AtomicU8::new(0);
+        match CACHED.load(Ordering::Relaxed) {
+                1 => return false,
+                2 => return true,
+                _ => {}
+        }
+        let path = module_path_lower();
+        let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        // Start/Search live under SystemApps. Older UWP (Notes and the
+        // other Windows 8-style hosts) run in ApplicationFrameHost, or as
+        // a packaged exe whose top-level window is already above the
+        // desktop band. Do not treat every WindowsApps process this way —
+        // Photos and Terminal already show a normal popup.
+        let yes = path.contains("\\systemapps\\")
+                || file == "applicationframehost.exe"
+                || file == "microsoft.notes.exe"
+                || host_band_and_owner(HWND::default()).0 > 1;
+        CACHED.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+        yes
+}
+
+fn create_candidate_hwnd(parent: HWND) -> Option<HWND> {
+        let ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+        let style = WS_POPUP | WS_BORDER;
+        if geometryless_host() {
+                if let Some(hwnd) = create_in_host_band(ex, style, parent) {
+                        return Some(hwnd);
+                }
+                static FALLBACK_LOGGED: AtomicBool = AtomicBool::new(false);
+                if !FALLBACK_LOGGED.swap(true, Ordering::Relaxed) {
+                        globals::log_error("candidate band window unavailable; using desktop popup");
+                }
+        }
+        let hwnd = unsafe {
+                CreateWindowExW(
+                        ex,
+                        PCWSTR(CANDIDATE_CLASS.as_ptr()),
+                        w!(""),
+                        style,
+                        0,
+                        0,
+                        10,
+                        10,
+                        None,
+                        None,
+                        Some(globals::dll_instance()),
+                        None,
+                )
+        }
+        .ok()?;
+        if hwnd.is_invalid() { None } else { Some(hwnd) }
+}
+
+fn create_in_host_band(ex: WINDOW_EX_STYLE, style: WINDOW_STYLE, preferred: HWND) -> Option<HWND> {
+        let (create, _) = band_apis()?;
+        let atom = candidate_class_atom()?;
+        let (band, owner) = host_band_and_owner(preferred);
+        if band <= 1 {
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                        globals::log_error(&format!("candidate host band={band}; desktop popup"));
+                }
+                return None;
+        }
+        unsafe {
+                let hwnd = create(ex, atom, w!(""), style, 0, 0, 10, 10, owner, HMENU::default(), globals::dll_instance(), std::ptr::null(), band);
+                if !hwnd.is_invalid() {
+                        static LOGGED: AtomicBool = AtomicBool::new(false);
+                        if !LOGGED.swap(true, Ordering::Relaxed) {
+                                globals::log_error(&format!(
+                                        "candidate window in band {band} owner={:#x}",
+                                        owner.0 as usize
+                                ));
+                        }
+                        return Some(hwnd);
+                }
+                let err = GetLastError();
+                // Same band, no owner — an owner in another band makes the
+                // call fail, and a band-0 window sits under the shell again.
+                let hwnd = create(
+                        ex,
+                        atom,
+                        w!(""),
+                        style,
+                        0,
+                        0,
+                        10,
+                        10,
+                        HWND::default(),
+                        HMENU::default(),
+                        globals::dll_instance(),
+                        std::ptr::null(),
+                        band,
+                );
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                        globals::log_error(&format!(
+                                "CreateWindowInBand band={band} owner failed err={} unowned={}",
+                                err.0,
+                                !hwnd.is_invalid()
+                        ));
+                }
+                if hwnd.is_invalid() { None } else { Some(hwnd) }
+        }
+}
+
+/// Where to anchor the list when GetTextExt has no line box. A non-zero
+/// point is still a caret; a fully empty rect falls back to the Win32 caret,
+/// then to the foreground window (under a small Notes-style window, just
+/// below the Start search field otherwise).
+fn anchor_for_degenerate(rect: RECT) -> RECT {
+        if rect.left != 0 || rect.top != 0 {
+                let mut placed = rect;
+                if placed.bottom == placed.top {
+                        placed.bottom = placed.top.saturating_add(1);
+                }
+                return placed;
+        }
+        unsafe {
+                let mut gui = GUITHREADINFO::default();
+                gui.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+                if GetGUIThreadInfo(GetCurrentThreadId(), &mut gui).is_ok() && !gui.hwndCaret.is_invalid() {
+                        let c = gui.rcCaret;
+                        if c.left != 0 || c.top != 0 || c.bottom != 0 {
+                                let mut pt = POINT { x: c.left, y: c.bottom.max(c.top) };
+                                if ClientToScreen(gui.hwndCaret, &mut pt).as_bool() {
+                                        return RECT { left: pt.x, top: pt.y, right: pt.x, bottom: pt.y.saturating_add(1) };
+                                }
+                        }
+                }
+                let fg = GetForegroundWindow();
+                let mut wr = RECT::default();
+                if !fg.is_invalid() && GetWindowRect(fg, &mut wr).is_ok() && wr.right > wr.left {
+                        let dpi = (GetDpiForWindow(fg) as i32).max(96);
+                        let height = wr.bottom - wr.top;
+                        // Compact UWP windows (Notes): hang the list under the frame.
+                        // Large shell surfaces (Start): the query field sits near the top.
+                        if height < (500 * dpi) / 96 {
+                                return RECT { left: wr.left + (8 * dpi) / 96, top: wr.bottom, right: wr.left, bottom: wr.bottom.saturating_add(1) };
+                        }
+                        let y = wr.top + (64 * dpi) / 96;
+                        let x = wr.left + (24 * dpi) / 96;
+                        return RECT { left: x, top: y, right: x, bottom: y.saturating_add(1) };
+                }
+        }
+        RECT { left: 80, top: 80, right: 80, bottom: 81 }
+}
+
+fn move_candidate_to(hwnd: HWND, window_state: &std::sync::Arc<Mutex<CandidateWindowState>>, page_size: usize, rect: RECT) {
+        let (width, height) = {
+                let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
+                (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)
+        };
+        let (w, h) = (width.max(80), height.max(24));
+        let (nx, ny) = CandidateWindow::clamp_to_work_area(rect.left, rect.bottom + 2, w, h, rect.top);
+        unsafe {
+                let _ = MoveWindow(hwnd, nx, ny, w, h, true);
+        }
+}
+
+/// `None` means a real CUAS/IMM bridge (hide our window). `Some` is a rect
+/// the candidate window should be moved to.
+fn resolve_text_ext(rect: RECT) -> Option<RECT> {
+        if rect.top != rect.bottom {
+                return Some(rect);
+        }
+        if !geometryless_host() {
+                return None;
+        }
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+                let anchor = anchor_for_degenerate(rect);
+                globals::log_error(&format!(
+                        "geometryless host text-ext=({},{}..{},{}) anchor=({},{})",
+                        rect.left, rect.top, rect.right, rect.bottom, anchor.left, anchor.top
+                ));
+                return Some(anchor);
+        }
+        Some(anchor_for_degenerate(rect))
+}
+
 // Rendering goes through the shared candview module.
 
 fn measure_height(state: &CandidateWindowState, _page_size: usize) -> u32 {
@@ -362,6 +643,10 @@ fn measure_width(state: &CandidateWindowState, hwnd: HWND) -> u32 {
 unsafe extern "system" fn candidate_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         unsafe {
                 match msg {
+                        // WS_EX_NOACTIVATE is not enough: a click can still pull
+                        // keyboard focus off the host edit (Start / UWP then
+                        // kills the composition). Refuse activation.
+                        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
                         WM_PAINT => {
                                 let mut ps = PAINTSTRUCT::default();
                                 let hdc = BeginPaint(hwnd, &mut ps);
@@ -513,15 +798,12 @@ impl CandidateListPresenter {
         /// `pbShow` from BeginUIElement is advisory — apps that report true
         /// (Chromium) rely on the framework's candidate UI which never
         /// actually renders for our element, so honoring it produced no
-        /// window at all (0.9.3). Exception: system-app hosts (anything under
-        /// %SystemRoot%\SystemApps — SearchHost, TextInputHost,
-        /// StartMenuExperienceHost) DO render our element through the
-        /// immersive candidate UI, and their custom canvas also reports a
-        /// degenerate GetTextExt rect which trips bridge detection — trusting
-        /// pbShow there is the only path that draws anything (Start menu).
+        /// window at all (0.9.3). SystemApps (Start, SearchHost) and older
+        /// UWP hosts report the opposite (`pbShow` false, "we will draw")
+        /// and also don't draw. Always create our own window; those hosts
+        /// get it in their z-order band so it isn't covered.
         pub fn deferred_begin(this: &ComObject<CandidateListPresenter>) {
                 let presenter = this.get();
-                let mut host_draws = false;
                 if let Some(ui_mgr) = presenter.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                         let element: ITfUIElement = this.to_interface();
                         let mut show = BOOL(0);
@@ -539,21 +821,28 @@ impl CandidateListPresenter {
                                 globals::log_error(&format!("BeginUIElement ok: show={} id={id} systemapp={}", show.as_bool(), is_system_apps_process()));
                         }
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
-                        // pbShow=FALSE means a sink consumed the element and
-                        // will render it — trust that only for system-app
-                        // hosts (immersive candidate UI). For everything else
-                        // we draw our own window regardless (Chromium-class
-                        // sinks report states that never render — 0.9.3).
-                        host_draws = !show.as_bool() && is_system_apps_process();
+                        // pbShow=FALSE means a sink claimed the element. That
+                        // claim is not honored: Chromium never paints, and
+                        // Start / old UWP claim it and paint nothing either.
+                        // Keep the flag update so a sink that does read the
+                        // list still sees a dirty element, and always draw.
                         if !show.as_bool() {
                                 presenter.updated_flags.store(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
                         }
                 }
                 presenter.is_show_mode.store(true, Ordering::Relaxed);
-                if host_draws {
-                        return;
-                }
-                match CandidateWindow::create(HWND::default(), presenter.page_size, presenter.window_state.clone()) {
+                let owner = {
+                        let context = presenter.context.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        context
+                                .as_ref()
+                                .and_then(|context| unsafe {
+                                        let view = context.GetActiveView().ok()?;
+                                        view.GetWnd().ok()
+                                })
+                                .filter(|hwnd| !hwnd.is_invalid())
+                                .unwrap_or_default()
+                };
+                match CandidateWindow::create(owner, presenter.page_size, presenter.window_state.clone()) {
                         Some(window) => {
                                 globals::log("candidate window created");
                                 *presenter.window.lock().unwrap_or_else(|e| e.into_inner()) = Some(window);
@@ -587,8 +876,14 @@ impl CandidateListPresenter {
                         window.show(false);
                 }
                 if let Some(unk) = unk {
-                        DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, DEFER_END)));
-                        crate::tray::post_deferred_ui();
+                        if inline_ui_host() {
+                                if let Ok(obj) = ComObject::<CandidateListPresenter>::cast_from(&unk) {
+                                        obj.get().deferred_end();
+                                }
+                        } else {
+                                DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, DEFER_END)));
+                                crate::tray::post_deferred_ui();
+                        }
                 }
         }
 
@@ -771,30 +1066,33 @@ impl CandidateListPresenter {
                                 // Weasel's CUAS test: zero *height* means a
                                 // cicero-unaware host. Width may legitimately
                                 // be zero — a collapsed caret has left==right.
-                                if rect.top == rect.bottom {
-                                        self.bridge_detected.store(true, Ordering::Relaxed);
-                                        static BRIDGE_LOGGED: AtomicBool = AtomicBool::new(false);
-                                        if !BRIDGE_LOGGED.swap(true, Ordering::Relaxed) {
-                                                globals::log_error(&format!("bridge detected: zero-height text-ext rect=({},{}..{},{})", rect.left, rect.top, rect.right, rect.bottom));
+                                // Start / old UWP also report zero height, but
+                                // they are TSF hosts with no line box; they
+                                // are excluded in resolve_text_ext.
+                                match resolve_text_ext(rect) {
+                                        None => {
+                                                self.bridge_detected.store(true, Ordering::Relaxed);
+                                                static BRIDGE_LOGGED: AtomicBool = AtomicBool::new(false);
+                                                if !BRIDGE_LOGGED.swap(true, Ordering::Relaxed) {
+                                                        globals::log_error(&format!("bridge detected: zero-height text-ext rect=({},{}..{},{})", rect.left, rect.top, rect.right, rect.bottom));
+                                                }
                                         }
-                                        return true;
-                                }
-                                // A real rect means the earlier degenerate read
-                                // was transient (fresh text field not laid out
-                                // yet — AutoCAD/Qt hit this on the first
-                                // composition per field) — not a bridge host.
-                                self.bridge_detected.store(false, Ordering::Relaxed);
-                                let (width, height) = {
-                                        let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
-                                        (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)
-                                };
-                                let (w, h) = (width.max(80), height.max(24));
-                                let (nx, ny) = CandidateWindow::clamp_to_work_area(rect.left, rect.bottom + 2, w, h, rect.top);
-                                unsafe {
-                                        let _ = MoveWindow(hwnd, nx, ny, w, h, true);
+                                        Some(anchor) => {
+                                                // A real rect means the earlier degenerate
+                                                // read was transient (fresh text field not
+                                                // laid out yet — AutoCAD/Qt hit this on the
+                                                // first composition per field).
+                                                self.bridge_detected.store(false, Ordering::Relaxed);
+                                                move_candidate_to(hwnd, &window_state, page_size, anchor);
+                                        }
                                 }
                                 return true;
                         }
+                }
+                if geometryless_host() {
+                        self.bridge_detected.store(false, Ordering::Relaxed);
+                        move_candidate_to(hwnd, &window_state, page_size, anchor_for_degenerate(RECT::default()));
+                        return true;
                 }
                 let is_show = self.is_show_mode.load(Ordering::Relaxed);
                 let bridge_detected = self.bridge_detected.clone();
@@ -807,19 +1105,17 @@ impl CandidateListPresenter {
                                 let mut rect = RECT::default();
                                 let mut clipped = BOOL(0);
                                 unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped)? };
-                                if rect.top == rect.bottom {
-                                        bridge_detected.store(true, Ordering::Relaxed);
-                                        return Ok(());
+                                match resolve_text_ext(rect) {
+                                        None => {
+                                                bridge_detected.store(true, Ordering::Relaxed);
+                                                return Ok(());
+                                        }
+                                        Some(anchor) => {
+                                                bridge_detected.store(false, Ordering::Relaxed);
+                                                move_candidate_to(hwnd, &window_state, page_size, anchor);
+                                        }
                                 }
-                                bridge_detected.store(false, Ordering::Relaxed);
-                                let (width, height) = {
-                                        let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
-                                        (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)
-                                };
-                                let (w, h) = (width.max(80), height.max(24));
-                                let (nx, ny) = CandidateWindow::clamp_to_work_area(rect.left, rect.bottom + 2, w, h, rect.top);
                                 unsafe {
-                                        let _ = MoveWindow(hwnd, nx, ny, w, h, true);
                                         if is_show && !bridge_detected.load(Ordering::Relaxed) {
                                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                                                 let _ = InvalidateRect(Some(hwnd), None, true);
@@ -859,14 +1155,14 @@ impl CandidateListPresenter {
         fn defer_ui_op(&self, op: u8) {
                 let unk = self.self_unk.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let Some(unk) = unk else { return };
-                // System-app hosts (SearchHost/TextInputHost) may run the
-                // edit session on a thread that never pumps our message-only
-                // window — the AC log showed keys eaten but zero
-                // BeginUIElement, i.e. deferred ops starved. Weasel calls
-                // BeginUIElement inline everywhere; these hosts' sinks are
-                // MS-authored and safe to notify inside a session, so skip
-                // the deferral for them entirely.
-                if is_system_apps_process() {
+                // SystemApps and older UWP hosts (ApplicationFrameHost, the
+                // Notes package) may run the edit session on a thread that
+                // never pumps our message-only window — keys are handled but
+                // BeginUIElement never runs, so no candidate window. Their
+                // sinks are OS-authored and safe to notify inside a session.
+                // Chromium is not in this set: its sink probes the document
+                // and deadlocks if called while we hold the doc lock.
+                if inline_ui_host() {
                         if let Ok(obj) = ComObject::<CandidateListPresenter>::cast_from(&unk) {
                                 match op {
                                         DEFER_BEGIN => Self::deferred_begin(&obj),
@@ -949,17 +1245,21 @@ impl CandidateListPresenter {
 
 /// True when the host process is a modern system shell under
 /// %SystemRoot%\SystemApps (SearchHost, TextInputHost,
-/// StartMenuExperienceHost). Those genuinely render our UI element through
-/// the immersive candidate UI when BeginUIElement reports pbShow=true —
-/// unlike Chromium's sink which claims the same but never draws (0.9.3).
+/// StartMenuExperienceHost). Their UI-element sinks are safe to notify
+/// inside an edit session, and their thread may never pump the deferred
+/// UI window — see defer_ui_op.
 fn is_system_apps_process() -> bool {
-        use std::sync::OnceLock;
         static IS: OnceLock<bool> = OnceLock::new();
-        *IS.get_or_init(|| {
-                let mut buf = [0u16; 260];
-                let n = unsafe { windows::Win32::System::LibraryLoader::GetModuleFileNameW(None, &mut buf) } as usize;
-                String::from_utf16_lossy(&buf[..n]).to_lowercase().starts_with("c:\\windows\\systemapps\\")
-        })
+        *IS.get_or_init(|| module_path_lower().contains("\\systemapps\\"))
+}
+
+fn inline_ui_host() -> bool {
+        if is_system_apps_process() {
+                return true;
+        }
+        let path = module_path_lower();
+        let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        file == "applicationframehost.exe" || file == "microsoft.notes.exe"
 }
 
 const DEFER_BEGIN: u8 = 0;
@@ -1004,7 +1304,24 @@ impl ITfUIElement_Impl for CandidateListPresenter_Impl {
         }
         fn Show(&self, bshow: BOOL) -> Result<()> {
                 globals::guarded("CandUIElement::Show", || {
-                        self.show(bshow.as_bool());
+                        let want = bshow.as_bool();
+                        // Shell and older UWP sinks call Show(FALSE) to say
+                        // they will paint the element. They don't, and a
+                        // later call is not followed by refresh_window, so
+                        // keep the list visible while it still has rows.
+                        if !want && geometryless_host() {
+                                let has_items = !self
+                                        .window_state
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .items
+                                        .is_empty();
+                                if has_items {
+                                        self.show(true);
+                                        return Ok(());
+                                }
+                        }
+                        self.show(want);
                         Ok(())
                 })
         }
