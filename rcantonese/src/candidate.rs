@@ -143,15 +143,14 @@ impl CandidateWindowState {
                 Some((start, end))
         }
 
-        /// Port of _SetSelectionInPage.
+        /// Port of _SetSelectionInPage. `pos` is an offset within the current
+        /// page, so it has to stay inside that page — a host that pages by 10
+        /// must not let key 0 land on the next page of 7.
         fn set_selection_in_page(&mut self, pos: usize) -> bool {
-                if pos >= self.items.len() {
-                        return false;
-                }
                 let page = self.current_page();
-                let Some((start, _)) = self.page_bounds(page) else { return false };
+                let Some((start, end)) = self.page_bounds(page) else { return false };
                 let index = start + pos;
-                if index >= self.items.len() {
+                if index > end || index >= self.items.len() {
                         return false;
                 }
                 self.selection = index;
@@ -710,6 +709,9 @@ pub struct CandidateListPresenter {
         client_id: AtomicU32,
         updated_flags: AtomicU32,
         is_show_mode: AtomicBool,
+        /// Page width taken from the host's SetPageIndex (0 = it never
+        /// called, so paging and digit keys stay on the IME setting).
+        host_page_size: AtomicU32,
         layout_sink_cookie: AtomicU32,
         edit_cookie: AtomicU32,
         /// Self IUnknown so &self methods can enqueue deferred UI ops with a
@@ -735,6 +737,7 @@ impl CandidateListPresenter {
                         client_id: AtomicU32::new(0),
                         updated_flags: AtomicU32::new(0),
                         is_show_mode: AtomicBool::new(true),
+                        host_page_size: AtomicU32::new(0),
                         layout_sink_cookie: AtomicU32::new(TF_INVALID_COOKIE),
                         edit_cookie: AtomicU32::new(u32::MAX),
                         self_unk: Mutex::new(None),
@@ -910,12 +913,27 @@ impl CandidateListPresenter {
 
         // -- list/selection model -----------------------------------------
 
+        /// Width the host asked for, or the IME setting when it has not.
+        fn effective_page_size(&self) -> usize {
+                let host = self.host_page_size.load(Ordering::Relaxed);
+                if host > 0 { host as usize } else { self.page_size }
+        }
+
+        /// `Some` only after SetPageIndex told us a real page width.
+        pub fn host_page_size(&self) -> Option<u32> {
+                let host = self.host_page_size.load(Ordering::Relaxed);
+                if host == 0 { None } else { Some(host) }
+        }
+
         pub fn set_text(&self, items: Vec<CandidateItem>) {
                 {
                         let mut state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
                         state.items = items;
                         state.selection = 0;
-                        state.rebuild_pages(self.page_size);
+                        // A host that already declared its page width (FFXIV's
+                        // 10) keeps it across candidate refreshes. Otherwise
+                        // the IME setting (default 7) stands.
+                        state.rebuild_pages(self.effective_page_size());
                 }
                 self.updated_flags
                         .fetch_or(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
@@ -1379,16 +1397,32 @@ impl ITfCandidateListUIElement_Impl for CandidateListPresenter_Impl {
         }
         fn SetPageIndex(&self, pindex: *const u32, upagecnt: u32) -> Result<()> {
                 globals::guarded("CandUIElement::SetPageIndex", || {
-                        if pindex.is_null() {
+                        if pindex.is_null() || upagecnt == 0 {
                                 return Err(Error::from_hresult(E_INVALIDARG));
                         }
-                        let mut state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.page_start_indices.clear();
+                        let mut starts = Vec::with_capacity(upagecnt as usize);
                         unsafe {
                                 for i in 0..upagecnt as usize {
-                                        state.page_start_indices.push(*pindex.add(i) as usize);
+                                        starts.push(*pindex.add(i) as usize);
                                 }
                         }
+                        // The host's page width is the gap between the first
+                        // two page starts (FFXIV: 0, 10, 20 → 10). One page
+                        // alone doesn't say how wide the page is, so the IME
+                        // default stays in force.
+                        let width = starts.get(1).and_then(|second| starts.first().map(|first| second.saturating_sub(*first))).filter(|w| *w > 0);
+                        if let Some(width) = width {
+                                self.host_page_size.store(width as u32, Ordering::Relaxed);
+                        }
+                        static LOGGED: AtomicBool = AtomicBool::new(false);
+                        if !LOGGED.swap(true, Ordering::Relaxed) {
+                                globals::log_error(&format!("SetPageIndex pages={upagecnt} width={}", width.unwrap_or(0)));
+                        }
+                        let mut state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(width) = width {
+                                state.page_size = width;
+                        }
+                        state.page_start_indices = starts;
                         Ok(())
                 })
         }

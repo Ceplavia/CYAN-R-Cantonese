@@ -221,7 +221,19 @@ pub fn test_key(
                 return None;
         }
         let Some(processor) = state.processor.clone() else { return None };
-        let processor = processor.lock().unwrap_or_else(|e| e.into_inner());
+        let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
+        // Digit keys follow the host's page width once it has called
+        // SetPageIndex. With no such call, put the range back to the IME
+        // setting so a previous game list doesn't stick.
+        let want = state
+                .candidate_presenter
+                .as_ref()
+                .and_then(|presenter| presenter.host_page_size())
+                .unwrap_or(processor.settings.candidate_page_size);
+        let want = crate::settings::candidate_page_size_from_raw(want);
+        if processor.keys.candidate_list_index_range().len() as u32 != want {
+                processor.keys.set_candidate_list_range(want);
+        }
 
         // Punctuation fallback — port of _IsKeyEaten. A key that is both a
         // punctuation key and an input key (apostrophe) stays an input key.
