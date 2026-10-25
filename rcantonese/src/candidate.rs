@@ -465,10 +465,6 @@ fn create_candidate_hwnd(parent: HWND) -> Option<HWND> {
                 if let Some(hwnd) = create_in_host_band(ex, style, parent) {
                         return Some(hwnd);
                 }
-                static FALLBACK_LOGGED: AtomicBool = AtomicBool::new(false);
-                if !FALLBACK_LOGGED.swap(true, Ordering::Relaxed) {
-                        globals::log_error("candidate band window unavailable; using desktop popup");
-                }
         }
         let hwnd = unsafe {
                 CreateWindowExW(
@@ -495,25 +491,13 @@ fn create_in_host_band(ex: WINDOW_EX_STYLE, style: WINDOW_STYLE, preferred: HWND
         let atom = candidate_class_atom()?;
         let (band, owner) = host_band_and_owner(preferred);
         if band <= 1 {
-                static LOGGED: AtomicBool = AtomicBool::new(false);
-                if !LOGGED.swap(true, Ordering::Relaxed) {
-                        globals::log_error(&format!("candidate host band={band}; desktop popup"));
-                }
                 return None;
         }
         unsafe {
                 let hwnd = create(ex, atom, w!(""), style, 0, 0, 10, 10, owner, HMENU::default(), globals::dll_instance(), std::ptr::null(), band);
                 if !hwnd.is_invalid() {
-                        static LOGGED: AtomicBool = AtomicBool::new(false);
-                        if !LOGGED.swap(true, Ordering::Relaxed) {
-                                globals::log_error(&format!(
-                                        "candidate window in band {band} owner={:#x}",
-                                        owner.0 as usize
-                                ));
-                        }
                         return Some(hwnd);
                 }
-                let err = GetLastError();
                 // Same band, no owner — an owner in another band makes the
                 // call fail, and a band-0 window sits under the shell again.
                 let hwnd = create(
@@ -531,14 +515,6 @@ fn create_in_host_band(ex: WINDOW_EX_STYLE, style: WINDOW_STYLE, preferred: HWND
                         std::ptr::null(),
                         band,
                 );
-                static LOGGED: AtomicBool = AtomicBool::new(false);
-                if !LOGGED.swap(true, Ordering::Relaxed) {
-                        globals::log_error(&format!(
-                                "CreateWindowInBand band={band} owner failed err={} unowned={}",
-                                err.0,
-                                !hwnd.is_invalid()
-                        ));
-                }
                 if hwnd.is_invalid() { None } else { Some(hwnd) }
         }
 }
@@ -605,15 +581,6 @@ fn resolve_text_ext(rect: RECT) -> Option<RECT> {
         }
         if !geometryless_host() {
                 return None;
-        }
-        static LOGGED: AtomicBool = AtomicBool::new(false);
-        if !LOGGED.swap(true, Ordering::Relaxed) {
-                let anchor = anchor_for_degenerate(rect);
-                globals::log_error(&format!(
-                        "geometryless host text-ext=({},{}..{},{}) anchor=({},{})",
-                        rect.left, rect.top, rect.right, rect.bottom, anchor.left, anchor.top
-                ));
-                return Some(anchor);
         }
         Some(anchor_for_degenerate(rect))
 }
@@ -822,10 +789,6 @@ impl CandidateListPresenter {
                                         presenter.is_show_mode.store(true, Ordering::Relaxed);
                                         return;
                                 }
-                        }
-                        static LOGGED: AtomicBool = AtomicBool::new(false);
-                        if !LOGGED.swap(true, Ordering::Relaxed) {
-                                globals::log_error(&format!("BeginUIElement ok: show={} id={id} systemapp={}", show.as_bool(), is_system_apps_process()));
                         }
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
                         // pbShow=FALSE means a sink claimed the element. That
@@ -1094,10 +1057,6 @@ impl CandidateListPresenter {
                                 match resolve_text_ext(rect) {
                                         None => {
                                                 self.bridge_detected.store(true, Ordering::Relaxed);
-                                                static BRIDGE_LOGGED: AtomicBool = AtomicBool::new(false);
-                                                if !BRIDGE_LOGGED.swap(true, Ordering::Relaxed) {
-                                                        globals::log_error(&format!("bridge detected: zero-height text-ext rect=({},{}..{},{})", rect.left, rect.top, rect.right, rect.bottom));
-                                                }
                                         }
                                         Some(anchor) => {
                                                 // A real rect means the earlier degenerate
@@ -1413,10 +1372,6 @@ impl ITfCandidateListUIElement_Impl for CandidateListPresenter_Impl {
                         let width = starts.get(1).and_then(|second| starts.first().map(|first| second.saturating_sub(*first))).filter(|w| *w > 0);
                         if let Some(width) = width {
                                 self.host_page_size.store(width as u32, Ordering::Relaxed);
-                        }
-                        static LOGGED: AtomicBool = AtomicBool::new(false);
-                        if !LOGGED.swap(true, Ordering::Relaxed) {
-                                globals::log_error(&format!("SetPageIndex pages={upagecnt} width={}", width.unwrap_or(0)));
                         }
                         let mut state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(width) = width {
