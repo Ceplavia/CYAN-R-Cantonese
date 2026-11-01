@@ -143,6 +143,15 @@ impl CandidateWindowState {
                 Some((start, end))
         }
 
+        /// Current page as `[start, end)`.
+        fn current_page_span(&self) -> (usize, usize) {
+                let page = self.current_page();
+                match self.page_bounds(page) {
+                        Some((start, end)) if !self.items.is_empty() => (start, end + 1),
+                        _ => (0, 0),
+                }
+        }
+
         /// Port of _SetSelectionInPage. `pos` is an offset within the current
         /// page, so it has to stay inside that page — a host that pages by 10
         /// must not let key 0 land on the next page of 7.
@@ -774,6 +783,9 @@ impl CandidateListPresenter {
         /// get it in their z-order band so it isn't covered.
         pub fn deferred_begin(this: &ComObject<CandidateListPresenter>) {
                 let presenter = this.get();
+                // Classify the host before the sink reads the list. A bridge
+                // that misses this first read keeps a 9-wide page (FFXIV).
+                presenter.note_bridge_from_text_ext();
                 if let Some(ui_mgr) = presenter.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                         let element: ITfUIElement = this.to_interface();
                         let mut show = BOOL(0);
@@ -1061,6 +1073,7 @@ impl CandidateListPresenter {
                 }
                 let is_show = self.is_show_mode.load(Ordering::Relaxed);
                 let bridge_detected = self.bridge_detected.clone();
+                let refresh_unk = self.self_unk.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let _ = crate::composition::request_edit_session(
                         &self.service,
                         &context,
@@ -1073,6 +1086,13 @@ impl CandidateListPresenter {
                                 match resolve_text_ext(rect) {
                                         None => {
                                                 bridge_detected.store(true, Ordering::Relaxed);
+                                                // The first read may already have published
+                                                // the full list. Ask the host to read again
+                                                // now that only the current page is visible.
+                                                if let Some(unk) = refresh_unk.clone() {
+                                                        DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, DEFER_UPDATE)));
+                                                        crate::tray::post_deferred_ui();
+                                                }
                                                 return Ok(());
                                         }
                                         Some(anchor) => {
@@ -1146,8 +1166,35 @@ impl CandidateListPresenter {
         /// never inside an edit session (same deadlock class as
         /// BeginUIElement). All callers are key-path/session code, so defer.
         fn update_ui_element(&self) {
+                // The UI element is the current page only, so a page turn
+                // replaces the strings the host is holding.
+                self.updated_flags.fetch_or(
+                        TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE,
+                        Ordering::Relaxed,
+                );
                 self.defer_ui_op(DEFER_UPDATE);
         }
+
+        /// Zero-height text extent on a normal desktop process is a CUAS
+        /// bridge. Geometryless shell hosts also report zero height and are
+        /// not bridges.
+        fn note_bridge_from_text_ext(&self) {
+                let context = self.context.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let range = self.range.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let (Some(context), Some(range)) = (context, range) else { return };
+                let Ok(view) = (unsafe { context.GetActiveView() }) else { return };
+                let ec = self.edit_cookie.load(Ordering::Relaxed);
+                if ec == u32::MAX {
+                        return;
+                }
+                let mut rect = RECT::default();
+                let mut clipped = BOOL(0);
+                if unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped) }.is_ok() {
+                        let bridge = rect.top == rect.bottom && !geometryless_host();
+                        self.bridge_detected.store(bridge, Ordering::Relaxed);
+                }
+        }
+
 
         fn do_update_ui_element(&self) {
                 let id = self.ui_element_id.load(Ordering::Relaxed);
@@ -1307,15 +1354,29 @@ impl ITfCandidateListUIElement_Impl for CandidateListPresenter_Impl {
                         .ok_or_else(|| Error::from_hresult(E_UNEXPECTED))
         }
         fn GetCount(&self) -> Result<u32> {
-                Ok(self.window_state.lock().unwrap_or_else(|e| e.into_inner()).count())
+                // Weasel publishes only the current page. A full list with
+                // several page starts makes FFXIV fall back to 9 rows;
+                // GetCount == page width is what shows 5 for Weasel.
+                let state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
+                let (start, end) = state.current_page_span();
+                Ok((end - start) as u32)
         }
         fn GetSelection(&self) -> Result<u32> {
-                Ok(self.get_selection())
+                let state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
+                let (start, end) = state.current_page_span();
+                let local = state.selection.saturating_sub(start);
+                let len = end.saturating_sub(start);
+                Ok(if len == 0 { 0 } else { local.min(len - 1) as u32 })
         }
         fn GetString(&self, uindex: u32) -> Result<BSTR> {
                 globals::guarded("CandUIElement::GetString", || {
                         let state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
-                        let Some(item) = state.items.get(uindex as usize) else {
+                        let (start, end) = state.current_page_span();
+                        let index = start + uindex as usize;
+                        if index >= end {
+                                return Err(Error::from_hresult(E_FAIL));
+                        }
+                        let Some(item) = state.items.get(index) else {
                                 return Err(Error::from_hresult(E_FAIL));
                         };
                         Ok(BSTR::from(item.text.as_str()))
@@ -1323,16 +1384,18 @@ impl ITfCandidateListUIElement_Impl for CandidateListPresenter_Impl {
         }
         fn GetPageIndex(&self, pindex: *mut u32, usize_: u32, pupagecnt: *mut u32) -> Result<()> {
                 globals::guarded("CandUIElement::GetPageIndex", || {
-                        let state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
+                        // One page at index 0. The strings are already the
+                        // current page, so the bridge's page width is GetCount.
+                        if pupagecnt.is_null() {
+                                return Err(Error::from_hresult(E_INVALIDARG));
+                        }
                         unsafe {
-                                if !pupagecnt.is_null() {
-                                        *pupagecnt = state.page_start_indices.len() as u32;
-                                }
+                                *pupagecnt = 1;
                                 if !pindex.is_null() {
-                                        let count = (usize_ as usize).min(state.page_start_indices.len());
-                                        for i in 0..count {
-                                                *pindex.add(i) = state.page_start_indices[i] as u32;
+                                        if usize_ < 1 {
+                                                return Err(Error::from_hresult(E_INVALIDARG));
                                         }
+                                        *pindex = 0;
                                 }
                         }
                         Ok(())
@@ -1343,24 +1406,21 @@ impl ITfCandidateListUIElement_Impl for CandidateListPresenter_Impl {
                         if pindex.is_null() || upagecnt == 0 {
                                 return Err(Error::from_hresult(E_INVALIDARG));
                         }
-                        // The bridge may push its own page starts (FFXIV: stride
-                        // 9). Keep the IME setting; GetPageIndex keeps returning
-                        // that width so the host draws the configured page.
+                        // Weasel ignores this. The page width stays the IME setting.
                         let _ = (pindex, upagecnt);
                         Ok(())
                 })
         }
         fn GetCurrentPage(&self) -> Result<u32> {
-                globals::guarded("CandUIElement::GetCurrentPage", || {
-                        Ok(self.window_state.lock().unwrap_or_else(|e| e.into_inner()).current_page() as u32)
-                })
+                globals::guarded("CandUIElement::GetCurrentPage", || Ok(0))
         }
 }
 
 impl ITfCandidateListUIElementBehavior_Impl for CandidateListPresenter_Impl {
         fn SetSelection(&self, nindex: u32) -> Result<()> {
                 globals::guarded("CandBehavior::SetSelection", || {
-                        self.set_selection(nindex as i32);
+                        let start = self.window_state.lock().unwrap_or_else(|e| e.into_inner()).current_page_span().0;
+                        self.set_selection(start as i32 + nindex as i32);
                         Ok(())
                 })
         }
