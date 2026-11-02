@@ -425,19 +425,36 @@ fn host_band_and_owner(preferred: HWND) -> (u32, HWND) {
         unsafe {
                 let our_pid = GetCurrentProcessId();
                 let fg = GetForegroundWindow();
+                let mut best_band = 0u32;
+                let mut best_hwnd = HWND::default();
                 for hwnd in [preferred, fg] {
-                        if hwnd.is_invalid() {
-                                continue;
+                        // The text view can sit in band 1 while its frame
+                        // (Notes / ApplicationFrameHost) is higher. Walk
+                        // parents — EnumWindows cannot see these windows and
+                        // must not run inside an edit session.
+                        let mut cur = hwnd;
+                        for _ in 0..8 {
+                                if cur.is_invalid() {
+                                        break;
+                                }
+                                let mut pid = 0u32;
+                                let _ = GetWindowThreadProcessId(cur, Some(&mut pid));
+                                if pid == our_pid {
+                                        let mut band = 0u32;
+                                        if get_band(cur, &mut band).as_bool() && band > best_band {
+                                                best_band = band;
+                                                best_hwnd = cur;
+                                        }
+                                }
+                                let Ok(parent) = GetParent(cur) else { break };
+                                if parent.is_invalid() || parent == cur {
+                                        break;
+                                }
+                                cur = parent;
                         }
-                        let mut pid = 0u32;
-                        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-                        if pid != our_pid {
-                                continue;
-                        }
-                        let mut band = 0u32;
-                        if get_band(hwnd, &mut band).as_bool() && band > 1 {
-                                return (band, hwnd);
-                        }
+                }
+                if best_band > 1 {
+                        return (best_band, best_hwnd);
                 }
                 (0, HWND::default())
         }
@@ -470,9 +487,16 @@ fn geometryless_host() -> bool {
 fn create_candidate_hwnd(parent: HWND) -> Option<HWND> {
         let ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
         let style = WS_POPUP | WS_BORDER;
+        let mut owner = None;
         if geometryless_host() {
                 if let Some(hwnd) = create_in_host_band(ex, style, parent) {
                         return Some(hwnd);
+                }
+                // Band 1 UWP (Notes in ApplicationFrameHost): a null-owner
+                // popup is covered by the frame. Owning it by the text view
+                // keeps it above that window.
+                if !parent.is_invalid() {
+                        owner = Some(parent);
                 }
         }
         let hwnd = unsafe {
@@ -485,7 +509,7 @@ fn create_candidate_hwnd(parent: HWND) -> Option<HWND> {
                         0,
                         10,
                         10,
-                        None,
+                        owner,
                         None,
                         Some(globals::dll_instance()),
                         None,
@@ -570,10 +594,11 @@ fn anchor_for_degenerate(rect: RECT) -> RECT {
         RECT { left: 80, top: 80, right: 80, bottom: 81 }
 }
 
-fn move_candidate_to(hwnd: HWND, window_state: &std::sync::Arc<Mutex<CandidateWindowState>>, page_size: usize, rect: RECT) {
+fn move_candidate_to(hwnd: HWND, window_state: &std::sync::Arc<Mutex<CandidateWindowState>>, rect: RECT) {
         let (width, height) = {
                 let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
-                (measure_width(&state, hwnd) as i32, measure_height(&state, page_size) as i32)
+                let page = state.page_size.max(1);
+                (measure_width(&state, hwnd) as i32, measure_height(&state, page) as i32)
         };
         let (w, h) = (width.max(80), height.max(24));
         let (nx, ny) = CandidateWindow::clamp_to_work_area(rect.left, rect.bottom + 2, w, h, rect.top);
@@ -885,6 +910,13 @@ impl CandidateListPresenter {
         // -- list/selection model -----------------------------------------
 
         pub fn set_text(&self, items: Vec<CandidateItem>) {
+                self.set_text_paged(items, self.page_size);
+        }
+
+        /// `page_size` is the published page width. Candidates use the IME
+        /// setting; the options menu passes its full row count so a host
+        /// that draws the element (FFXIV) sees every row on one page.
+        pub fn set_text_paged(&self, items: Vec<CandidateItem>, page_size: usize) {
                 {
                         let mut state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
                         state.items = items;
@@ -892,7 +924,7 @@ impl CandidateListPresenter {
                         // Page width is the IME setting. A host SetPageIndex
                         // must not replace it — FFXIV's bridge asks for 9,
                         // and the on-screen list then ignores the setting.
-                        state.rebuild_pages(self.page_size);
+                        state.rebuild_pages(page_size.max(1));
                 }
                 self.updated_flags
                         .fetch_or(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
@@ -1033,7 +1065,6 @@ impl CandidateListPresenter {
                 let window_state = self.window_state.clone();
                 let window = self.window.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|w| w.hwnd);
                 let (Some(context), Some(range), Some(hwnd)) = (context, range, window) else { return false };
-                let page_size = self.page_size;
                 let client_id = self.client_id.load(Ordering::Relaxed);
                 let view = match unsafe { context.GetActiveView() } {
                         Ok(v) => v,
@@ -1060,7 +1091,7 @@ impl CandidateListPresenter {
                                                 // laid out yet — AutoCAD/Qt hit this on the
                                                 // first composition per field).
                                                 self.bridge_detected.store(false, Ordering::Relaxed);
-                                                move_candidate_to(hwnd, &window_state, page_size, anchor);
+                                                move_candidate_to(hwnd, &window_state, anchor);
                                         }
                                 }
                                 return true;
@@ -1068,7 +1099,7 @@ impl CandidateListPresenter {
                 }
                 if geometryless_host() {
                         self.bridge_detected.store(false, Ordering::Relaxed);
-                        move_candidate_to(hwnd, &window_state, page_size, anchor_for_degenerate(RECT::default()));
+                        move_candidate_to(hwnd, &window_state, anchor_for_degenerate(RECT::default()));
                         return true;
                 }
                 let is_show = self.is_show_mode.load(Ordering::Relaxed);
@@ -1097,7 +1128,7 @@ impl CandidateListPresenter {
                                         }
                                         Some(anchor) => {
                                                 bridge_detected.store(false, Ordering::Relaxed);
-                                                move_candidate_to(hwnd, &window_state, page_size, anchor);
+                                                move_candidate_to(hwnd, &window_state, anchor);
                                         }
                                 }
                                 unsafe {
@@ -1373,28 +1404,29 @@ impl ITfCandidateListUIElement_Impl for CandidateListPresenter_Impl {
                         let state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
                         let (start, end) = state.current_page_span();
                         let index = start + uindex as usize;
-                        if index >= end {
-                                return Err(Error::from_hresult(E_FAIL));
-                        }
-                        let Some(item) = state.items.get(index) else {
-                                return Err(Error::from_hresult(E_FAIL));
+                        // Always hand back a real BSTR. FFXIV ignores the
+                        // HRESULT and frees whatever was in the out pointer;
+                        // E_FAIL left that uninitialized and crashed the game
+                        // when the options menu (empty separators, or a read
+                        // past the published page) was on screen.
+                        let text = if index < end {
+                                state.items.get(index).map(|item| item.text.as_str()).unwrap_or("")
+                        } else {
+                                ""
                         };
-                        Ok(BSTR::from(item.text.as_str()))
+                        let published = if text.is_empty() { "\u{2014}" } else { text };
+                        Ok(BSTR::from(published))
                 })
         }
         fn GetPageIndex(&self, pindex: *mut u32, usize_: u32, pupagecnt: *mut u32) -> Result<()> {
                 globals::guarded("CandUIElement::GetPageIndex", || {
                         // One page at index 0. The strings are already the
                         // current page, so the bridge's page width is GetCount.
-                        if pupagecnt.is_null() {
-                                return Err(Error::from_hresult(E_INVALIDARG));
-                        }
                         unsafe {
-                                *pupagecnt = 1;
-                                if !pindex.is_null() {
-                                        if usize_ < 1 {
-                                                return Err(Error::from_hresult(E_INVALIDARG));
-                                        }
+                                if !pupagecnt.is_null() {
+                                        *pupagecnt = 1;
+                                }
+                                if !pindex.is_null() && usize_ >= 1 {
                                         *pindex = 0;
                                 }
                         }
@@ -1425,8 +1457,30 @@ impl ITfCandidateListUIElementBehavior_Impl for CandidateListPresenter_Impl {
                 })
         }
         fn Finalize(&self) -> Result<()> {
-                // Commit the selected candidate via the service key handler path.
-                Ok(())
+                globals::guarded("CandBehavior::Finalize", || {
+                        // Normal candidate confirm is the digit/space key path.
+                        // The options menu is the list that contains separators;
+                        // a game click lands here with the highlighted row.
+                        let index = {
+                                let state = self.window_state.lock().unwrap_or_else(|e| e.into_inner());
+                                if !state.items.iter().any(|item| item.separator) {
+                                        return Ok(());
+                                }
+                                state.selection
+                        };
+                        let context = self.context.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        let Some(context) = context else { return Ok(()) };
+                        let client_id = self.client_id.load(Ordering::Relaxed);
+                        let service = self.service.clone();
+                        let _ = crate::composition::request_edit_session(
+                                &service,
+                                &context,
+                                client_id,
+                                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+                                Box::new(move |state, ec, ctx| crate::keys::handle_options_finalize(state, ec, ctx, index)),
+                        );
+                        Ok(())
+                })
         }
         fn Abort(&self) -> Result<()> {
                 globals::guarded("CandBehavior::Abort", || {

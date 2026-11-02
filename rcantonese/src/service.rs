@@ -602,6 +602,31 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                                 return Ok(BOOL(0));
                         }
                         let guid = unsafe { *rguid };
+                        // Options menu. Start consumes Ctrl+` before OnKeyDown,
+                        // so the preserved key opens it from an edit session.
+                        // The normal key path also calls this; options_edge
+                        // drops the duplicate.
+                        if guid == globals::GUID_PRESERVEDKEY_OPTIONS {
+                                if crate::keys::OPTIONS_KEY_SEEN.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                                        return Ok(BOOL(1));
+                                }
+                                let Some(state) = self.try_lock() else { return Ok(BOOL(1)) };
+                                let svc = state.self_iunknown.clone();
+                                let ctx = state.context.clone();
+                                let client_id = state.client_id;
+                                drop(state);
+                                if let (Some(svc), Some(ctx)) = (svc, ctx) {
+                                        let _ = crate::composition::request_edit_session(
+                                                &svc,
+                                                &ctx,
+                                                client_id,
+                                                windows::Win32::UI::TextServices::TF_ES_ASYNCDONTCARE
+                                                        | windows::Win32::UI::TextServices::TF_ES_READWRITE,
+                                                Box::new(|state, ec, context| crate::keys::handle_options_toggle(state, ec, context)),
+                                        );
+                                }
+                                return Ok(BOOL(1));
+                        }
                         let Some(state) = self.try_lock() else { return Ok(BOOL(0)) };
                         let (Some(processor), Some(thread_mgr)) = (state.processor.clone(), state.thread_mgr.clone()) else {
                                 return Ok(BOOL(0));

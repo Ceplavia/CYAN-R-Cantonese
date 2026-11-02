@@ -194,6 +194,7 @@ pub fn test_key(
                 ));
         }
         if options_hotkey {
+                OPTIONS_KEY_SEEN.store(true, std::sync::atomic::Ordering::Release);
                 return Some((
                         KeystrokeState {
                                 category: KeystrokeCategory::Candidate,
@@ -1081,8 +1082,30 @@ fn options_rows(processor: &std::sync::Arc<Mutex<Processor>>) -> Vec<CandidateIt
                 .collect()
 }
 
+/// Set by the key sink when it is about to handle Ctrl+`. The preserved-key
+/// callback then skips, so a late async session cannot close the menu it
+/// just opened. Start never hits the key sink, so the flag stays clear and
+/// the preserved key is what opens the menu.
+pub(crate) static OPTIONS_KEY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ctrl+` arrives both as a normal key and as a preserved key (Start eats
+/// the normal one). The two deliveries land in the same press.
+fn options_edge() -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+        let prev = LAST.load(Ordering::Relaxed);
+        if now.wrapping_sub(prev) <= 250 {
+                return false;
+        }
+        LAST.compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+}
+
 /// Port of ToggleOptionsMode.
-fn handle_options_toggle(state: &mut ServiceState, ec: u32, context: &ITfContext) -> Result<()> {
+pub(crate) fn handle_options_toggle(state: &mut ServiceState, ec: u32, context: &ITfContext) -> Result<()> {
+        if !options_edge() {
+                return Ok(());
+        }
         if state.candidate_mode == CandidateMode::Options {
                 return handle_options_close(state, ec, context);
         }
@@ -1091,11 +1114,13 @@ fn handle_options_toggle(state: &mut ServiceState, ec: u32, context: &ITfContext
                 return Err(Error::from_hresult(E_UNEXPECTED));
         };
         let items = options_rows(&processor);
+        let page = items.len().max(1);
         if let Some(presenter) = &state.candidate_presenter {
                 // A composition's candidate list is showing — swap in the
-                // options rows; closing restores the candidates.
-                presenter.clear_list();
-                presenter.set_text(items);
+                // options rows; closing restores the candidates. One update,
+                // not a clear to zero rows: Start dismisses the UI on a
+                // count of 0 and does not bring it back.
+                presenter.set_text_paged(items, page);
                 state.candidate_mode = CandidateMode::Options;
                 globals::log("options toggle: swapped into existing presenter");
                 return Ok(());
@@ -1126,28 +1151,47 @@ fn handle_options_toggle(state: &mut ServiceState, ec: u32, context: &ITfContext
                 presenter.end();
                 return Err(e);
         }
-        presenter.set_text(items);
+        presenter.set_text_paged(items, page);
         state.candidate_presenter = Some(presenter);
         state.candidate_mode = CandidateMode::Options;
         globals::log("options toggle: standalone presenter shown");
         Ok(())
 }
 
-/// Close the menu; when a composition is live, rebuild its candidate list.
+/// Close the menu. A live composition keeps the same UI element and just
+/// puts the candidate page back — EndUIElement + a new Begin while FFXIV is
+/// still reading the menu crashes the game.
 fn handle_options_close(state: &mut ServiceState, ec: u32, context: &ITfContext) -> Result<()> {
+        let composing = state.is_composing();
+        if composing {
+                if let (Some(presenter), Some(processor)) = (state.candidate_presenter.clone(), state.processor.clone()) {
+                        state.candidate_mode = CandidateMode::Incremental;
+                        let (reading, candidates) = {
+                                let mut p = processor.lock().unwrap_or_else(|e| e.into_inner());
+                                let reading = p.reading_string().unwrap_or_default();
+                                let candidates = p.candidate_list();
+                                (reading, candidates)
+                        };
+                        let reading_wide: Vec<u16> = reading.encode_utf16().collect();
+                        composition::add_composing_and_char(state, ec, context, &reading_wide)?;
+                        if candidates.is_empty() {
+                                presenter.end();
+                                state.candidate_presenter = None;
+                                state.candidate_mode = CandidateMode::None;
+                        } else {
+                                presenter.set_text(candidates);
+                        }
+                        return Ok(());
+                }
+        }
         if let Some(presenter) = state.candidate_presenter.take() {
                 presenter.end();
         }
         state.candidate_mode = CandidateMode::None;
-        if state.is_composing() {
-                if let Some(processor) = state.processor.clone() {
-                        return handle_composition_input_worker(state, processor, ec, context);
-                }
-        }
         Ok(())
 }
 
-/// Port of _ApplyOptionsSelection — row index → setting, then close.
+/// Port of _ApplyOptionsSelection — digit → selectable row, then close.
 fn handle_options_select(state: &mut ServiceState, ec: u32, context: &ITfContext, code: u32) -> Result<()> {
         let Some(processor) = state.processor.clone() else {
                 return Err(Error::from_hresult(E_UNEXPECTED));
@@ -1155,22 +1199,57 @@ fn handle_options_select(state: &mut ServiceState, ec: u32, context: &ITfContext
         let Some(pos) = candidate_index_from_code(&processor, code) else {
                 return Err(Error::from_hresult(S_FALSE));
         };
+        apply_options_choice(state, ec, context, crate::candview::options_choice(pos))
+}
+
+/// Game UIs pick a row by calling Finalize on the highlighted index, not by
+/// sending a digit. `index` is the visual row (separators included).
+pub(crate) fn handle_options_finalize(state: &mut ServiceState, ec: u32, context: &ITfContext, index: usize) -> Result<()> {
+        if state.candidate_mode != CandidateMode::Options {
+                return Ok(());
+        }
+        let Some(processor) = state.processor.clone() else {
+                return Ok(());
+        };
+        let choice = {
+                let p = processor.lock().unwrap_or_else(|e| e.into_inner());
+                let rows = crate::candview::options_rows(&p.settings);
+                if rows.get(index).map(|r| r.separator).unwrap_or(true) {
+                        return Ok(());
+                }
+                let pos = rows.iter().take(index).filter(|r| !r.separator).count();
+                crate::candview::options_choice(pos)
+        };
+        apply_options_choice(state, ec, context, choice)
+}
+
+fn apply_options_choice(
+        state: &mut ServiceState,
+        ec: u32,
+        context: &ITfContext,
+        choice: Option<crate::candview::OptionsChoice>,
+) -> Result<()> {
+        let Some(choice) = choice else {
+                return Ok(());
+        };
+        let Some(processor) = state.processor.clone() else {
+                return Err(Error::from_hresult(E_UNEXPECTED));
+        };
         let Some(thread_mgr) = state.thread_mgr.clone() else {
                 return Err(Error::from_hresult(E_UNEXPECTED));
         };
         {
                 let mut p = processor.lock().unwrap_or_else(|e| e.into_inner());
-                match crate::candview::options_choice(pos) {
-                        Some(crate::candview::OptionsChoice::Variant(v)) => {
+                match choice {
+                        crate::candview::OptionsChoice::Variant(v) => {
                                 p.set_character_variant(v);
                         }
-                        Some(crate::candview::OptionsChoice::Form(f)) => {
+                        crate::candview::OptionsChoice::Form(f) => {
                                 p.set_character_form(f, &thread_mgr);
                         }
-                        Some(crate::candview::OptionsChoice::Punct(pf)) => {
+                        crate::candview::OptionsChoice::Punct(pf) => {
                                 p.set_punctuation_form(pf, &thread_mgr);
                         }
-                        None => {}
                 }
         }
         handle_options_close(state, ec, context)

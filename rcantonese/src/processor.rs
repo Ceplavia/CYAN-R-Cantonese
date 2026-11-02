@@ -243,6 +243,17 @@ impl Processor {
                         key(globals::GUID_PRESERVEDKEY_MODE_CANTONESE, 0x39, globals::TF_MOD_CONTROL | globals::TF_MOD_SHIFT, IDS_DESC_INPUT_MODE_CANTONESE),
                         key(globals::GUID_PRESERVEDKEY_MODE_ABC, 0x30, globals::TF_MOD_CONTROL | globals::TF_MOD_SHIFT, IDS_DESC_INPUT_MODE_ABC),
                 ];
+                // Ctrl+` (or whatever options_menu_keys lists first). Start
+                // eats the key before the key sink; a preserved key still
+                // arrives. The normal path stays for hosts that don't.
+                if let Some(&(vk, mods)) = self.settings.options_menu_keys.first() {
+                        self.preserved_keys.push(PreservedKey {
+                                guid: globals::GUID_PRESERVEDKEY_OPTIONS,
+                                vkey: vk,
+                                modifiers: mods & 0xffff,
+                                description: "Options".to_string(),
+                        });
+                }
 
                 if let Ok(keystroke_mgr) = thread_mgr.cast::<ITfKeystrokeMgr>() {
                         for key in &self.preserved_keys {
