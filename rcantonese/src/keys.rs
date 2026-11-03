@@ -161,19 +161,11 @@ pub fn test_key(
         if !is_key_down {
                 return None; // key-up only matters for preserved keys
         }
-        // Never eat keys while a Windows key is held — TF_MOD has no WIN bit,
-        // so query the OS directly or Win+D/Win+E/etc. get swallowed as
-        // plain letters.
-        unsafe {
-                let lwin = GetAsyncKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_LWIN.0 as i32);
-                let rwin = GetAsyncKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_RWIN.0 as i32);
-                if ((lwin | rwin) as u16 & 0x8000) != 0 {
-                        return None;
-                }
-        }
         // Options menu — port of IsOptionsShortcut / _optionsMode. The hotkey
         // list comes from settings.toml (`options_menu_keys`, default Ctrl+`);
         // it works in ABC mode too so the mode can be switched back.
+        // Checked before the Win-key bailout: the Start menu keeps the
+        // Windows key logically down, which used to drop Ctrl+` entirely.
         let modifiers = globals::modifiers_value();
         let options_hotkey = state
                 .processor
@@ -194,7 +186,6 @@ pub fn test_key(
                 ));
         }
         if options_hotkey {
-                OPTIONS_KEY_SEEN.store(true, std::sync::atomic::Ordering::Release);
                 return Some((
                         KeystrokeState {
                                 category: KeystrokeCategory::Candidate,
@@ -214,6 +205,16 @@ pub fn test_key(
                         _ => KeystrokeFunction::Cancel,
                 };
                 return Some((KeystrokeState { category: KeystrokeCategory::Candidate, function }, code, wch));
+        }
+        // Never eat keys while a Windows key is held — TF_MOD has no WIN bit,
+        // so query the OS directly or Win+D/Win+E/etc. get swallowed as
+        // plain letters. The options hotkey is already handled above.
+        unsafe {
+                let lwin = GetAsyncKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_LWIN.0 as i32);
+                let rwin = GetAsyncKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_RWIN.0 as i32);
+                if ((lwin | rwin) as u16 & 0x8000) != 0 {
+                        return None;
+                }
         }
         if !is_keyboard_open(state) {
                 // ABC mode — let everything through
@@ -1082,12 +1083,6 @@ fn options_rows(processor: &std::sync::Arc<Mutex<Processor>>) -> Vec<CandidateIt
                 .collect()
 }
 
-/// Set by the key sink when it is about to handle Ctrl+`. The preserved-key
-/// callback then skips, so a late async session cannot close the menu it
-/// just opened. Start never hits the key sink, so the flag stays clear and
-/// the preserved key is what opens the menu.
-pub(crate) static OPTIONS_KEY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// Ctrl+` arrives both as a normal key and as a preserved key (Start eats
 /// the normal one). The two deliveries land in the same press.
 fn options_edge() -> bool {
@@ -1128,17 +1123,13 @@ pub(crate) fn handle_options_toggle(state: &mut ServiceState, ec: u32, context: 
         // Standalone presenter anchored at the caret — port of _StartOptions.
         let mut selection = [TF_SELECTION::default()];
         let mut fetched = 0u32;
-        unsafe {
-                if let Err(e) = context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched) {
-                        globals::log_error(&format!("options toggle: GetSelection failed {e:?}"));
-                        return Err(e);
-                }
-        }
-        if fetched != 1 {
-                globals::log("options toggle: GetSelection fetched!=1");
-                return Err(Error::from_hresult(E_FAIL));
-        }
-        let range = unsafe { std::mem::ManuallyDrop::take(&mut selection[0].range) }.ok_or(E_POINTER)?;
+        let range = if unsafe { context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut fetched) }.is_ok() && fetched == 1 {
+                unsafe { std::mem::ManuallyDrop::take(&mut selection[0].range) }.ok_or(E_POINTER)?
+        } else {
+                // Start and Sticky Notes sometimes report no selection until
+                // the first composition. The insert point is still the caret.
+                composition::insert_at_selection(ec, context, &[])?
+        };
         let sink = state.self_iunknown.clone().ok_or(E_UNEXPECTED)?;
         let doc_mgr = unsafe { context.GetDocumentMgr()? };
         let Some(thread_mgr) = state.thread_mgr.clone() else {

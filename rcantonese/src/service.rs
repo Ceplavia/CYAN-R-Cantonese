@@ -607,24 +607,25 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                         // The normal key path also calls this; options_edge
                         // drops the duplicate.
                         if guid == globals::GUID_PRESERVEDKEY_OPTIONS {
-                                if crate::keys::OPTIONS_KEY_SEEN.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                                        return Ok(BOOL(1));
-                                }
-                                let Some(state) = self.try_lock() else { return Ok(BOOL(1)) };
+                                // state.context exists only during a composition.
+                                // Start and Sticky Notes pass the focused
+                                // document here, including when nothing is
+                                // being composed. Eating the key without that
+                                // document is what made the menu never appear.
+                                let Some(context) = _pic.as_ref().cloned() else { return Ok(BOOL(0)) };
+                                let Some(state) = self.try_lock() else { return Ok(BOOL(0)) };
                                 let svc = state.self_iunknown.clone();
-                                let ctx = state.context.clone();
                                 let client_id = state.client_id;
                                 drop(state);
-                                if let (Some(svc), Some(ctx)) = (svc, ctx) {
-                                        let _ = crate::composition::request_edit_session(
-                                                &svc,
-                                                &ctx,
-                                                client_id,
-                                                windows::Win32::UI::TextServices::TF_ES_ASYNCDONTCARE
-                                                        | windows::Win32::UI::TextServices::TF_ES_READWRITE,
-                                                Box::new(|state, ec, context| crate::keys::handle_options_toggle(state, ec, context)),
-                                        );
-                                }
+                                let Some(svc) = svc else { return Ok(BOOL(0)) };
+                                let _ = crate::composition::request_edit_session(
+                                        &svc,
+                                        &context,
+                                        client_id,
+                                        windows::Win32::UI::TextServices::TF_ES_ASYNCDONTCARE
+                                                | windows::Win32::UI::TextServices::TF_ES_READWRITE,
+                                        Box::new(|state, ec, context| crate::keys::handle_options_toggle(state, ec, context)),
+                                );
                                 return Ok(BOOL(1));
                         }
                         let Some(state) = self.try_lock() else { return Ok(BOOL(0)) };

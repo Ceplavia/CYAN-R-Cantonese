@@ -607,6 +607,39 @@ fn move_candidate_to(hwnd: HWND, window_state: &std::sync::Arc<Mutex<CandidateWi
         }
 }
 
+/// Screen point for the candidate list.
+///
+/// `Err` means GetTextExt itself failed. `Ok(None)` is a CUAS bridge.
+/// Geometryless hosts (Sticky Notes, Start) return the whole text view
+/// once the composition is longer than one character, and the list then
+/// jumps to the bottom of the note. The caret is the top of that box.
+fn anchor_rect(view: &ITfContextView, ec: u32, range: &ITfRange) -> Result<Option<RECT>> {
+        let mut full = RECT::default();
+        let mut clipped = BOOL(0);
+        unsafe { view.GetTextExt(ec, range, &mut full, &mut clipped)? };
+        if !geometryless_host() {
+                return Ok(resolve_text_ext(full));
+        }
+        let mut chosen = full;
+        if let Ok(caret) = unsafe { range.Clone() } {
+                if unsafe { caret.Collapse(ec, TF_ANCHOR_END) }.is_ok() {
+                        let mut caret_rect = RECT::default();
+                        let mut caret_clipped = BOOL(0);
+                        if unsafe { view.GetTextExt(ec, &caret, &mut caret_rect, &mut caret_clipped) }.is_ok()
+                                && (caret_rect.left != 0 || caret_rect.top != 0 || caret_rect.right != 0 || caret_rect.bottom != 0)
+                        {
+                                chosen = caret_rect;
+                        }
+                }
+        }
+        // Taller than a line: this is the view, not the caret.
+        if chosen.bottom.saturating_sub(chosen.top) > 96 {
+                chosen.right = chosen.left;
+                chosen.bottom = chosen.top;
+        }
+        Ok(resolve_text_ext(chosen))
+}
+
 /// `None` means a real CUAS/IMM bridge (hide our window). `Some` is a rect
 /// the candidate window should be moved to.
 fn resolve_text_ext(rect: RECT) -> Option<RECT> {
@@ -1072,29 +1105,27 @@ impl CandidateListPresenter {
                 };
                 let ec = self.edit_cookie.load(Ordering::Relaxed);
                 if ec != u32::MAX {
-                        let mut rect = RECT::default();
-                        let mut clipped = BOOL(0);
-                        if unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped) }.is_ok() {
-                                // Weasel's CUAS test: zero *height* means a
-                                // cicero-unaware host. Width may legitimately
-                                // be zero — a collapsed caret has left==right.
-                                // Start / old UWP also report zero height, but
-                                // they are TSF hosts with no line box; they
-                                // are excluded in resolve_text_ext.
-                                match resolve_text_ext(rect) {
-                                        None => {
-                                                self.bridge_detected.store(true, Ordering::Relaxed);
-                                        }
-                                        Some(anchor) => {
-                                                // A real rect means the earlier degenerate
-                                                // read was transient (fresh text field not
-                                                // laid out yet — AutoCAD/Qt hit this on the
-                                                // first composition per field).
-                                                self.bridge_detected.store(false, Ordering::Relaxed);
-                                                move_candidate_to(hwnd, &window_state, anchor);
-                                        }
+                        // Weasel's CUAS test: zero *height* means a
+                        // cicero-unaware host. Width may legitimately
+                        // be zero — a collapsed caret has left==right.
+                        // Start / old UWP also report zero height, but
+                        // they are TSF hosts with no line box; they
+                        // are excluded in resolve_text_ext.
+                        match anchor_rect(&view, ec, &range) {
+                                Ok(None) => {
+                                        self.bridge_detected.store(true, Ordering::Relaxed);
+                                        return true;
                                 }
-                                return true;
+                                Ok(Some(anchor)) => {
+                                        // A real rect means the earlier degenerate
+                                        // read was transient (fresh text field not
+                                        // laid out yet — AutoCAD/Qt hit this on the
+                                        // first composition per field).
+                                        self.bridge_detected.store(false, Ordering::Relaxed);
+                                        move_candidate_to(hwnd, &window_state, anchor);
+                                        return true;
+                                }
+                                Err(_) => {}
                         }
                 }
                 if geometryless_host() {
@@ -1111,26 +1142,19 @@ impl CandidateListPresenter {
                         client_id,
                         TF_ES_ASYNCDONTCARE | TF_ES_READ,
                         Box::new(move |_state, ec, _ctx| {
-                                let mut rect = RECT::default();
-                                let mut clipped = BOOL(0);
-                                unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped)? };
-                                match resolve_text_ext(rect) {
-                                        None => {
-                                                bridge_detected.store(true, Ordering::Relaxed);
-                                                // The first read may already have published
-                                                // the full list. Ask the host to read again
-                                                // now that only the current page is visible.
-                                                if let Some(unk) = refresh_unk.clone() {
-                                                        DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, DEFER_UPDATE)));
-                                                        crate::tray::post_deferred_ui();
-                                                }
-                                                return Ok(());
+                                let Some(resolved) = anchor_rect(&view, ec, &range)? else {
+                                        bridge_detected.store(true, Ordering::Relaxed);
+                                        // The first read may already have published
+                                        // the full list. Ask the host to read again
+                                        // now that only the current page is visible.
+                                        if let Some(unk) = refresh_unk.clone() {
+                                                DEFERRED_UI_OPS.with(|q| q.borrow_mut().push((unk, DEFER_UPDATE)));
+                                                crate::tray::post_deferred_ui();
                                         }
-                                        Some(anchor) => {
-                                                bridge_detected.store(false, Ordering::Relaxed);
-                                                move_candidate_to(hwnd, &window_state, anchor);
-                                        }
-                                }
+                                        return Ok(());
+                                };
+                                bridge_detected.store(false, Ordering::Relaxed);
+                                move_candidate_to(hwnd, &window_state, resolved);
                                 unsafe {
                                         if is_show && !bridge_detected.load(Ordering::Relaxed) {
                                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
