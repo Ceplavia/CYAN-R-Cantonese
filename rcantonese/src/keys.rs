@@ -6,8 +6,10 @@ use std::sync::Mutex;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::TextServices::*;
+use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, WH_KEYBOARD};
 
 use crate::candidate::CandidateListPresenter;
 use crate::compartment::Compartment;
@@ -1083,8 +1085,96 @@ fn options_rows(processor: &std::sync::Arc<Mutex<Processor>>) -> Vec<CandidateIt
                 .collect()
 }
 
-/// Ctrl+` arrives both as a normal key and as a preserved key (Start eats
-/// the normal one). The two deliveries land in the same press.
+struct OptionsTip {
+        service: IUnknown,
+        client_id: u32,
+        thread_mgr: ITfThreadMgr,
+}
+
+thread_local! {
+        static OPTIONS_TIP: std::cell::RefCell<Option<OptionsTip>> = const { std::cell::RefCell::new(None) };
+        static OPTIONS_HOOK: std::cell::Cell<HHOOK> = const { std::cell::Cell::new(HHOOK(std::ptr::null_mut())) };
+        static OPTIONS_HOOK_KEYS: std::cell::RefCell<Vec<(u32, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// See every options hotkey in Start and Sticky Notes, including a bare F4.
+/// Those hosts eat the key before the key sink. `mods` is the `TF_MOD_*` mask;
+/// zero means the key alone.
+pub(crate) fn install_options_hook(service: IUnknown, client_id: u32, thread_mgr: ITfThreadMgr, keys: Vec<(u32, u32)>) {
+        OPTIONS_HOOK_KEYS.with(|slot| *slot.borrow_mut() = keys);
+        OPTIONS_TIP.with(|tip| {
+                *tip.borrow_mut() = Some(OptionsTip { service, client_id, thread_mgr });
+        });
+        OPTIONS_HOOK.with(|slot| {
+                if !slot.get().is_invalid() {
+                        return;
+                }
+                if let Ok(hook) = unsafe {
+                        SetWindowsHookExW(WH_KEYBOARD, Some(options_kb_proc), Some(globals::dll_instance()), GetCurrentThreadId())
+                } {
+                        slot.set(hook);
+                }
+        });
+}
+
+pub(crate) fn remove_options_hook() {
+        OPTIONS_HOOK.with(|slot| {
+                let hook = slot.replace(HHOOK(std::ptr::null_mut()));
+                if !hook.is_invalid() {
+                        unsafe {
+                                let _ = UnhookWindowsHookEx(hook);
+                        }
+                }
+        });
+        OPTIONS_TIP.with(|tip| *tip.borrow_mut() = None);
+        OPTIONS_HOOK_KEYS.with(|slot| slot.borrow_mut().clear());
+}
+
+unsafe extern "system" fn options_kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 {
+                let vk = (wparam.0 & 0xff) as u32;
+                let key_up = lparam.0 & 0x8000_0000 != 0;
+                let repeat = lparam.0 & 0x4000_0000 != 0;
+                let matched = OPTIONS_HOOK_KEYS.with(|slot| {
+                        slot.borrow().iter().any(|&(want_vk, mods)| {
+                                if vk != want_vk {
+                                        return false;
+                                }
+                                let down = |vkey: i32| unsafe { GetKeyState(vkey) as u16 & 0x8000 != 0 };
+                                (mods & globals::TF_MOD_ALLCONTROL != 0) == down(0x11)
+                                        && (mods & globals::TF_MOD_ALLSHIFT != 0) == down(0x10)
+                                        && (mods & globals::TF_MOD_ALLALT != 0) == down(0x12)
+                        })
+                });
+                if !key_up && !repeat && matched {
+                        crate::tray::post_options_menu();
+                }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Hook delivery: open the menu on whatever document currently has focus.
+pub(crate) fn open_options_from_focus() {
+        let Some(tip) = OPTIONS_TIP.with(|tip| tip.borrow().as_ref().map(|t| OptionsTip {
+                service: t.service.clone(),
+                client_id: t.client_id,
+                thread_mgr: t.thread_mgr.clone(),
+        })) else {
+                return;
+        };
+        let Ok(doc) = (unsafe { tip.thread_mgr.GetFocus() }) else { return };
+        let Ok(context) = (unsafe { doc.GetTop() }) else { return };
+        let _ = composition::request_edit_session(
+                &tip.service,
+                &context,
+                tip.client_id,
+                TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
+                Box::new(|state, ec, context| handle_options_toggle(state, ec, context)),
+        );
+}
+
+/// The same physical press can arrive through the key sink and the thread
+/// hook. Ignore the second one. A later, separate press still toggles.
 fn options_edge() -> bool {
         use std::sync::atomic::{AtomicU64, Ordering};
         static LAST: AtomicU64 = AtomicU64::new(0);

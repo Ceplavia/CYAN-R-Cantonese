@@ -59,6 +59,10 @@ struct CandidateWindowState {
         candidate_font_size: u32,
         number_font_size: u32,
         comment_font_size: u32,
+        /// First good anchor for this list. Geometryless hosts (Sticky
+        /// Notes) later report a rect at the bottom of the control; a jump
+        /// that large is ignored.
+        stable_anchor: Option<(i32, i32)>,
 }
 
 impl crate::candview::RowLike for crate::processor::CandidateItem {
@@ -462,7 +466,7 @@ fn host_band_and_owner(preferred: HWND) -> (u32, HWND) {
 
 /// Hosts whose text view has no Win32 line box (Start, Search, old UWP).
 /// A zero-height GetTextExt here must not be treated as the CUAS bridge.
-fn geometryless_host() -> bool {
+pub(crate) fn geometryless_host() -> bool {
         static CACHED: AtomicU8 = AtomicU8::new(0);
         match CACHED.load(Ordering::Relaxed) {
                 1 => return false,
@@ -594,9 +598,20 @@ fn anchor_for_degenerate(rect: RECT) -> RECT {
         RECT { left: 80, top: 80, right: 80, bottom: 81 }
 }
 
-fn move_candidate_to(hwnd: HWND, window_state: &std::sync::Arc<Mutex<CandidateWindowState>>, rect: RECT) {
+fn move_candidate_to(hwnd: HWND, window_state: &std::sync::Arc<Mutex<CandidateWindowState>>, mut rect: RECT) {
         let (width, height) = {
-                let state = window_state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut state = window_state.lock().unwrap_or_else(|e| e.into_inner());
+                if geometryless_host() {
+                        if let Some((left, top)) = state.stable_anchor {
+                                if rect.top > top.saturating_add(80) {
+                                        rect.left = left;
+                                        rect.right = left;
+                                        rect.top = top;
+                                        rect.bottom = top.saturating_add(1);
+                                }
+                        }
+                        state.stable_anchor = Some((rect.left, rect.top));
+                }
                 let page = state.page_size.max(1);
                 (measure_width(&state, hwnd) as i32, measure_height(&state, page) as i32)
         };
@@ -617,27 +632,16 @@ fn anchor_rect(view: &ITfContextView, ec: u32, range: &ITfRange) -> Result<Optio
         let mut full = RECT::default();
         let mut clipped = BOOL(0);
         unsafe { view.GetTextExt(ec, range, &mut full, &mut clipped)? };
-        if !geometryless_host() {
-                return Ok(resolve_text_ext(full));
+        // Sticky Notes returns the whole text view once the composition is
+        // longer than one character. The top of that box is the line the
+        // text started on; the bottom is the control. A collapsed caret
+        // query is worse: it comes back as a normal line-height rect glued
+        // to the bottom, which is why the list still jumped.
+        if geometryless_host() && full.bottom.saturating_sub(full.top) > 96 {
+                full.right = full.left;
+                full.bottom = full.top;
         }
-        let mut chosen = full;
-        if let Ok(caret) = unsafe { range.Clone() } {
-                if unsafe { caret.Collapse(ec, TF_ANCHOR_END) }.is_ok() {
-                        let mut caret_rect = RECT::default();
-                        let mut caret_clipped = BOOL(0);
-                        if unsafe { view.GetTextExt(ec, &caret, &mut caret_rect, &mut caret_clipped) }.is_ok()
-                                && (caret_rect.left != 0 || caret_rect.top != 0 || caret_rect.right != 0 || caret_rect.bottom != 0)
-                        {
-                                chosen = caret_rect;
-                        }
-                }
-        }
-        // Taller than a line: this is the view, not the caret.
-        if chosen.bottom.saturating_sub(chosen.top) > 96 {
-                chosen.right = chosen.left;
-                chosen.bottom = chosen.top;
-        }
-        Ok(resolve_text_ext(chosen))
+        Ok(resolve_text_ext(full))
 }
 
 /// `None` means a real CUAS/IMM bridge (hide our window). `Some` is a rect

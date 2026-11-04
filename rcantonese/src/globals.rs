@@ -103,6 +103,13 @@ pub const GUID_PRESERVEDKEY_MODE_ABC: GUID =
 // {C4A91E70-2B58-4D6F-9E13-7A0B6C5D84F2}
 pub const GUID_PRESERVEDKEY_OPTIONS: GUID =
         GUID::from_values(0xc4a91e70, 0x2b58, 0x4d6f, [0x9e, 0x13, 0x7a, 0x0b, 0x6c, 0x5d, 0x84, 0xf2]);
+/// Extra preserved-key ids for `options_menu_keys` past the first. One GUID
+/// can only be preserved once, and F4 is a second entry in settings.
+pub const GUID_PRESERVEDKEY_OPTIONS_EXTRA: [GUID; 3] = [
+        GUID::from_values(0xc4a91e71, 0x2b58, 0x4d6f, [0x9e, 0x13, 0x7a, 0x0b, 0x6c, 0x5d, 0x84, 0xf2]),
+        GUID::from_values(0xc4a91e72, 0x2b58, 0x4d6f, [0x9e, 0x13, 0x7a, 0x0b, 0x6c, 0x5d, 0x84, 0xf2]),
+        GUID::from_values(0xc4a91e73, 0x2b58, 0x4d6f, [0x9e, 0x13, 0x7a, 0x0b, 0x6c, 0x5d, 0x84, 0xf2]),
+];
 
 // {101011C5-CF72-4F0C-A515-153019593F10}
 pub const GUID_COMPARTMENT_CHARACTER_FORM: GUID =
@@ -283,12 +290,18 @@ pub fn update_modifiers(wparam: usize, lparam: isize) {
 
         // Shift press-cycle tracking for the mode toggle — see SHIFT_PRESS_CLEAN.
         let event_vk = wparam & 0xff;
+        let key_up = lparam & 0x8000_0000 != 0;
+        let was_down = lparam & 0x4000_0000 != 0;
         if matches!(event_vk, 0x10 | 0xa0 | 0xa1) {
-                if shift_down {
+                // Only the initial Shift press can arm the 中/英 toggle.
+                // Repeats and the key-up itself must not re-arm it: Word
+                // still reports Shift down while delivering Shift+9's key-up,
+                // which turned a parenthesis into a mode switch.
+                if shift_down && !key_up && !was_down {
                         let win_down = key_down(0x5b) || key_down(0x5c);
                         SHIFT_PRESS_CLEAN.store(!(menu_down || ctrl_down || win_down), Ordering::Relaxed);
                 }
-        } else if key_down(event_vk as u32) && shift_down {
+        } else {
                 SHIFT_PRESS_CLEAN.store(false, Ordering::Relaxed);
         }
 

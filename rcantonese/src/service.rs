@@ -171,6 +171,7 @@ impl RCantoneseService_Impl {
                         return Ok(());
                 };
                 globals::log("Deactivate start");
+                crate::keys::remove_options_hook();
 
                 if let Some(context) = state.context.clone() {
                         crate::composition::end_composition(&mut state, &context);
@@ -368,6 +369,18 @@ impl RCantoneseService_Impl {
                 }
 
                 globals::log("ActivateEx success");
+                // Start / Sticky Notes eat Ctrl+` before the key sink. The
+                // hook only posts a message; the menu opens on the thread's
+                // own window proc.
+                if crate::candidate::geometryless_host() {
+                        let keys = state
+                                .processor
+                                .as_ref()
+                                .and_then(|p| p.lock().ok())
+                                .map(|p| p.settings.options_menu_keys.clone())
+                                .unwrap_or_else(|| vec![(0xC0, globals::TF_MOD_CONTROL)]);
+                        crate::keys::install_options_hook(self.as_iunknown(), tid, thread_mgr.clone(), keys);
+                }
                 Ok(())
         }
 }
@@ -606,7 +619,9 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                         // so the preserved key opens it from an edit session.
                         // The normal key path also calls this; options_edge
                         // drops the duplicate.
-                        if guid == globals::GUID_PRESERVEDKEY_OPTIONS {
+                        if guid == globals::GUID_PRESERVEDKEY_OPTIONS
+                                || globals::GUID_PRESERVEDKEY_OPTIONS_EXTRA.contains(&guid)
+                        {
                                 // state.context exists only during a composition.
                                 // Start and Sticky Notes pass the focused
                                 // document here, including when nothing is

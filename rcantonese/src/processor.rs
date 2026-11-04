@@ -243,12 +243,14 @@ impl Processor {
                         key(globals::GUID_PRESERVEDKEY_MODE_CANTONESE, 0x39, globals::TF_MOD_CONTROL | globals::TF_MOD_SHIFT, IDS_DESC_INPUT_MODE_CANTONESE),
                         key(globals::GUID_PRESERVEDKEY_MODE_ABC, 0x30, globals::TF_MOD_CONTROL | globals::TF_MOD_SHIFT, IDS_DESC_INPUT_MODE_ABC),
                 ];
-                // Ctrl+` (or whatever options_menu_keys lists first). Start
-                // eats the key before the key sink; a preserved key still
-                // arrives. The normal path stays for hosts that don't.
-                if let Some(&(vk, mods)) = self.settings.options_menu_keys.first() {
+                // Every options hotkey, not just the first. F4 is a second
+                // entry in settings; preserving only Ctrl+` left F4 to the
+                // key sink, which Start never calls for that key.
+                let option_guids = std::iter::once(globals::GUID_PRESERVEDKEY_OPTIONS)
+                        .chain(globals::GUID_PRESERVEDKEY_OPTIONS_EXTRA);
+                for (&(vk, mods), guid) in self.settings.options_menu_keys.iter().zip(option_guids) {
                         self.preserved_keys.push(PreservedKey {
-                                guid: globals::GUID_PRESERVEDKEY_OPTIONS,
+                                guid,
                                 vkey: vk,
                                 modifiers: mods & 0xffff,
                                 description: "Options".to_string(),

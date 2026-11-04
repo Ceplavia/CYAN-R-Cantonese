@@ -14,8 +14,28 @@ use crate::settings::{CharacterForm, ImeSettings, InputMethodMode, PunctuationFo
 use crate::variants::CharacterVariant;
 
 pub fn settings_path() -> PathBuf {
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        base.join("RCantonese").join("settings.toml")
+        local_appdata_dir().join("RCantonese").join("settings.toml")
+}
+
+/// LocalAppData of the signed-in user, not the package-private copy.
+/// Start and Search run as packaged apps. Their `LOCALAPPDATA` is a private
+/// folder that does not contain this file, so the options menu fell back to
+/// the OS UI language (English on this machine) instead of `ui_language`.
+fn local_appdata_dir() -> PathBuf {
+        unsafe {
+                if let Ok(raw) = windows::Win32::UI::Shell::SHGetKnownFolderPath(
+                        &windows::Win32::UI::Shell::FOLDERID_LocalAppData,
+                        windows::Win32::UI::Shell::KF_FLAG_NO_PACKAGE_REDIRECTION,
+                        None,
+                ) {
+                        let path = raw.to_string().unwrap_or_default();
+                        windows::Win32::System::Com::CoTaskMemFree(Some(raw.as_ptr() as *const std::ffi::c_void));
+                        if !path.is_empty() {
+                                return PathBuf::from(path);
+                        }
+                }
+        }
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
 }
 
 fn input_method_mode_name(mode: InputMethodMode) -> &'static str {

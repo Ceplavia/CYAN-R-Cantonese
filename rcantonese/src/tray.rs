@@ -39,6 +39,7 @@ const WM_TRAY_HIDE: u32 = WM_APP + 51; // wParam = pid — IME no longer current
 const WM_LANGBAR_REFRESH: u32 = WM_APP + 52; // host windows: deferred langbar icon refresh
 const WM_SHOW_SETTINGS_MENU: u32 = WM_APP + 53; // host windows: deferred right-click menu
 const WM_DEFERRED_UI: u32 = WM_APP + 54; // host windows: deferred candidate UI-element ops
+const WM_OPTIONS_MENU: u32 = WM_APP + 55; // host windows: Ctrl+` seen by the thread hook
 const TRAY_MAGIC: isize = 0x5243; // 'RC'
 
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
@@ -192,6 +193,22 @@ pub fn post_settings_menu(item_ptr: usize, x: i32, y: i32) {
 /// like Chromium probe the document inside the sink — which deadlocks if we
 /// call them while holding the edit-session doc lock. Replayed by the same
 /// per-thread message window the langbar deferral uses.
+/// Start and Sticky Notes often eat Ctrl+` before the key sink. The thread
+/// hook posts here; the window proc opens the menu outside the hook.
+pub fn post_options_menu() {
+        let target = REFRESH_HWND.with(|h| {
+                if h.get() == 0 {
+                        h.set(raw(create_refresh_window()));
+                }
+                h.get()
+        });
+        if target != 0 {
+                unsafe {
+                        let _ = PostMessageW(Some(hwnd(target)), WM_OPTIONS_MENU, WPARAM(0), LPARAM(0));
+                }
+        }
+}
+
 pub fn post_deferred_ui() {
         let target = REFRESH_HWND.with(|h| {
                 if h.get() == 0 {
@@ -258,6 +275,12 @@ unsafe extern "system" fn refresh_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM,
                 if msg == WM_DEFERRED_UI {
                         return globals::guarded_value("deferred ui ops", LRESULT(0), || {
                                 crate::candidate::run_deferred_ui_ops();
+                                LRESULT(0)
+                        });
+                }
+                if msg == WM_OPTIONS_MENU {
+                        return globals::guarded_value("options menu", LRESULT(0), || {
+                                crate::keys::open_options_from_focus();
                                 LRESULT(0)
                         });
                 }
