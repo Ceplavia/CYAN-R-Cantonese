@@ -290,8 +290,9 @@ pub fn update_modifiers(wparam: usize, lparam: isize) {
 
         // Shift press-cycle tracking for the mode toggle — see SHIFT_PRESS_CLEAN.
         let event_vk = wparam & 0xff;
-        let key_up = lparam & 0x8000_0000 != 0;
-        let was_down = lparam & 0x4000_0000 != 0;
+        let bits = lparam as u32;
+        let key_up = bits & 0x8000_0000 != 0;
+        let was_down = bits & 0x4000_0000 != 0;
         if matches!(event_vk, 0x10 | 0xa0 | 0xa1) {
                 // Only the initial Shift press can arm the 中/英 toggle.
                 // Repeats and the key-up itself must not re-arm it: Word

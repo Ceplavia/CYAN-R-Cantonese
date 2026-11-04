@@ -1133,8 +1133,9 @@ pub(crate) fn remove_options_hook() {
 unsafe extern "system" fn options_kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 {
                 let vk = (wparam.0 & 0xff) as u32;
-                let key_up = lparam.0 & 0x8000_0000 != 0;
-                let repeat = lparam.0 & 0x4000_0000 != 0;
+                let bits = lparam.0 as u32;
+                let key_up = bits & 0x8000_0000 != 0;
+                let repeat = bits & 0x4000_0000 != 0;
                 let matched = OPTIONS_HOOK_KEYS.with(|slot| {
                         slot.borrow().iter().any(|&(want_vk, mods)| {
                                 if vk != want_vk {
