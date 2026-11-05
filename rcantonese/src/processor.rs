@@ -116,7 +116,7 @@ pub struct Processor {
 }
 
 fn current_settings_mtime() -> Option<std::time::SystemTime> {
-        std::fs::metadata(crate::config::settings_path())
+        std::fs::metadata(crate::config::active_settings_path())
                 .and_then(|m| m.modified())
                 .ok()
 }
@@ -269,6 +269,45 @@ impl Processor {
                                 }
                         }
                 }
+        }
+
+        /// Preserved keys are registered once at activation. A later edit to
+        /// `options_menu_keys` has to be registered again, or a custom key
+        /// such as F4 stays invisible to Start.
+        fn refresh_option_hotkeys(&mut self, thread_mgr: &ITfThreadMgr) {
+                let option_guid = |guid: &GUID| {
+                        *guid == globals::GUID_PRESERVEDKEY_OPTIONS || globals::GUID_PRESERVEDKEY_OPTIONS_EXTRA.contains(guid)
+                };
+                if let Ok(keystroke_mgr) = thread_mgr.cast::<ITfKeystrokeMgr>() {
+                        for key in self.preserved_keys.iter().filter(|key| option_guid(&key.guid)) {
+                                let tf_key = TF_PRESERVEDKEY { uVKey: key.vkey, uModifiers: key.modifiers };
+                                unsafe {
+                                        let _ = keystroke_mgr.UnpreserveKey(&key.guid, &tf_key);
+                                }
+                        }
+                }
+                self.preserved_keys.retain(|key| !option_guid(&key.guid));
+                let option_guids = std::iter::once(globals::GUID_PRESERVEDKEY_OPTIONS).chain(globals::GUID_PRESERVEDKEY_OPTIONS_EXTRA);
+                let mut fresh = Vec::new();
+                for (&(vk, mods), guid) in self.settings.options_menu_keys.iter().zip(option_guids) {
+                        fresh.push(PreservedKey {
+                                guid,
+                                vkey: vk,
+                                modifiers: mods & 0xffff,
+                                description: "Options".to_string(),
+                        });
+                }
+                if let Ok(keystroke_mgr) = thread_mgr.cast::<ITfKeystrokeMgr>() {
+                        for key in &fresh {
+                                let tf_key = TF_PRESERVEDKEY { uVKey: key.vkey, uModifiers: key.modifiers };
+                                let desc_wide: Vec<u16> = key.description.encode_utf16().collect();
+                                unsafe {
+                                        let _ = keystroke_mgr.PreserveKey(self.client_id, &key.guid, &tf_key, &desc_wide);
+                                }
+                        }
+                }
+                self.preserved_keys.extend(fresh);
+                crate::keys::set_options_hook_keys(self.settings.options_menu_keys.clone());
         }
 
         pub fn unpreserve_all(&self, thread_mgr: &ITfThreadMgr) {
@@ -897,6 +936,7 @@ impl Processor {
                 self.settings.character_variant = variant;
                 self.settings.input_method_mode = mode;
                 self.keys.set_candidate_list_range(self.settings.candidate_page_size);
+                self.refresh_option_hotkeys(thread_mgr);
                 self.is_applying_settings = true;
                 self.apply_settings_to_compartments(thread_mgr);
                 self.private_compartments_updated(thread_mgr);

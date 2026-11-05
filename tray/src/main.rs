@@ -128,6 +128,29 @@ fn cleanup_residue(system: bool) {
                 clean_dead_preloads(HKEY_CURRENT_USER, "Keyboard Layout\\Preload");
                 clean_assembly_item_dups(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
                 clean_dead_assemblies(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\Assemblies");
+                delete_user_dir_value();
+        }
+}
+
+/// Remove `HKCU\Software\RCantonese\UserDir`. The key stays if an older
+/// `Settings` subkey is still there.
+fn delete_user_dir_value() {
+        use windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, KEY_READ, KEY_SET_VALUE};
+        unsafe {
+                let mut key = HKEY::default();
+                if RegOpenKeyExW(HKEY_CURRENT_USER, w!("Software\\RCantonese"), None, KEY_READ | KEY_SET_VALUE, &mut key).is_err() {
+                        return;
+                }
+                let _ = RegDeleteValueW(key, w!("UserDir"));
+                let mut name = [0u16; 64];
+                let mut name_len = name.len() as u32;
+                let has_subkey = RegEnumKeyExW(key, 0, Some(windows::core::PWSTR(name.as_mut_ptr())), &mut name_len, None, None, None, None).is_ok();
+                name_len = name.len() as u32;
+                let has_value = RegEnumValueW(key, 0, Some(windows::core::PWSTR(name.as_mut_ptr())), &mut name_len, None, None, None, None).is_ok();
+                let _ = RegCloseKey(key);
+                if !has_subkey && !has_value {
+                        let _ = RegDeleteKeyW(HKEY_CURRENT_USER, w!("Software\\RCantonese"));
+                }
         }
 }
 
@@ -867,6 +890,25 @@ fn class_windows() -> Vec<HWND> {
         hwnds.into_iter().map(|h| HWND(h as *mut std::ffi::c_void)).collect()
 }
 
+/// Same record Weasel writes as `RimeUserDir`: the expanded absolute
+/// directory, so a packaged host does not follow its private `%LOCALAPPDATA%`.
+fn remember_user_dir() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegSetValueExW, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ};
+        let Some(local) = std::env::var_os("LOCALAPPDATA") else { return };
+        let dir = std::path::PathBuf::from(local).join("RCantonese");
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        unsafe {
+                let mut key = HKEY::default();
+                if RegCreateKeyExW(HKEY_CURRENT_USER, w!("Software\\RCantonese"), None, None, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut key, None).is_err() {
+                        return;
+                }
+                let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+                let _ = RegSetValueExW(key, w!("UserDir"), None, REG_SZ, Some(bytes));
+                let _ = RegCloseKey(key);
+        }
+}
+
 fn main() {
         // Headless cleanup modes invoked by the installer post-install —
         // run before the single-instance check so they work while a tray is
@@ -880,6 +922,7 @@ fn main() {
                 cleanup_residue(true);
                 return;
         }
+        remember_user_dir();
         unsafe {
                 // Single instance among tray.exe-owned windows; stale
                 // in-process workers get told to quit instead of blocking us.

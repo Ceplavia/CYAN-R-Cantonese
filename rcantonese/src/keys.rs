@@ -169,18 +169,13 @@ pub fn test_key(
         // Checked before the Win-key bailout: the Start menu keeps the
         // Windows key logically down, which used to drop Ctrl+` entirely.
         let modifiers = globals::modifiers_value();
-        let options_hotkey = state
-                .processor
-                .as_ref()
-                .map(|arc| {
-                        arc.lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .settings
-                                .options_menu_keys
-                                .iter()
-                                .any(|&(vk, m)| vk == code && globals::check_modifiers(modifiers, m))
-                })
-                .unwrap_or(false);
+        let hotkeys = state.processor.as_ref().map(|arc| {
+                arc.lock().unwrap_or_else(|e| e.into_inner()).settings.options_menu_keys.clone()
+        });
+        let options_hotkey = hotkeys
+                .unwrap_or_default()
+                .iter()
+                .any(|&(vk, m)| vk == code && hotkey_mods_match(modifiers, m));
         if code == 0xC0 || options_hotkey {
                 globals::log(&format!(
                         "options check: code={code:#04x} mods={modifiers:#06x} hotkey={options_hotkey} keys={:?}",
@@ -1100,8 +1095,12 @@ thread_local! {
 /// See every options hotkey in Start and Sticky Notes, including a bare F4.
 /// Those hosts eat the key before the key sink. `mods` is the `TF_MOD_*` mask;
 /// zero means the key alone.
-pub(crate) fn install_options_hook(service: IUnknown, client_id: u32, thread_mgr: ITfThreadMgr, keys: Vec<(u32, u32)>) {
+pub(crate) fn set_options_hook_keys(keys: Vec<(u32, u32)>) {
         OPTIONS_HOOK_KEYS.with(|slot| *slot.borrow_mut() = keys);
+}
+
+pub(crate) fn install_options_hook(service: IUnknown, client_id: u32, thread_mgr: ITfThreadMgr, keys: Vec<(u32, u32)>) {
+        set_options_hook_keys(keys);
         OPTIONS_TIP.with(|tip| {
                 *tip.borrow_mut() = Some(OptionsTip { service, client_id, thread_mgr });
         });
@@ -1137,15 +1136,7 @@ unsafe extern "system" fn options_kb_proc(code: i32, wparam: WPARAM, lparam: LPA
                 let key_up = bits & 0x8000_0000 != 0;
                 let repeat = bits & 0x4000_0000 != 0;
                 let matched = OPTIONS_HOOK_KEYS.with(|slot| {
-                        slot.borrow().iter().any(|&(want_vk, mods)| {
-                                if vk != want_vk {
-                                        return false;
-                                }
-                                let down = |vkey: i32| unsafe { GetKeyState(vkey) as u16 & 0x8000 != 0 };
-                                (mods & globals::TF_MOD_ALLCONTROL != 0) == down(0x11)
-                                        && (mods & globals::TF_MOD_ALLSHIFT != 0) == down(0x10)
-                                        && (mods & globals::TF_MOD_ALLALT != 0) == down(0x12)
-                        })
+                        slot.borrow().iter().any(|&(want_vk, mods)| vk == want_vk && hotkey_mods_match(0, mods))
                 });
                 if !key_up && !repeat && matched {
                         crate::tray::post_options_menu();
@@ -1172,6 +1163,18 @@ pub(crate) fn open_options_from_focus() {
                 TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
                 Box::new(|state, ec, context| handle_options_toggle(state, ec, context)),
         );
+}
+
+/// A bare key such as F4 must not consult the modifier bitmap. Start leaves
+/// the Windows key logically down, and a stuck Ctrl bit would make F4 miss
+/// while Ctrl+` (which expects Ctrl) still matches.
+fn hotkey_mods_match(current: u32, expected: u32) -> bool {
+        let expected = expected & !globals::TF_MOD_ON_KEYUP;
+        if expected == 0 {
+                let down = |vk: i32| unsafe { GetAsyncKeyState(vk) as u16 & 0x8000 != 0 };
+                return !down(0x11) && !down(0x10) && !down(0x12);
+        }
+        globals::check_modifiers(current, expected)
 }
 
 /// The same physical press can arrive through the key sink and the thread

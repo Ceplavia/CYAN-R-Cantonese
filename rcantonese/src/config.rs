@@ -13,29 +13,89 @@ use crate::globals;
 use crate::settings::{CharacterForm, ImeSettings, InputMethodMode, PunctuationForm};
 use crate::variants::CharacterVariant;
 
+/// One settings file. Weasel stores the expanded absolute user directory in
+/// `HKCU\Software\Rime\Weasel\RimeUserDir` and every component reads that.
+/// `%LOCALAPPDATA%` inside Start/Search is a private folder, so the path has
+/// to be the real directory, not the environment variable.
 pub fn settings_path() -> PathBuf {
-        local_appdata_dir().join("RCantonese").join("settings.toml")
-}
-
-/// LocalAppData of the signed-in user, not the package-private copy.
-/// Start and Search run as packaged apps. Their `LOCALAPPDATA` is a private
-/// folder that does not contain this file, so the options menu fell back to
-/// the OS UI language (English on this machine) instead of `ui_language`.
-fn local_appdata_dir() -> PathBuf {
-        unsafe {
-                if let Ok(raw) = windows::Win32::UI::Shell::SHGetKnownFolderPath(
-                        &windows::Win32::UI::Shell::FOLDERID_LocalAppData,
-                        windows::Win32::UI::Shell::KF_FLAG_NO_PACKAGE_REDIRECTION,
-                        None,
-                ) {
-                        let path = raw.to_string().unwrap_or_default();
-                        windows::Win32::System::Com::CoTaskMemFree(Some(raw.as_ptr() as *const std::ffi::c_void));
-                        if !path.is_empty() {
-                                return PathBuf::from(path);
-                        }
+        if let Some(dir) = registry_user_dir() {
+                let path = dir.join("settings.toml");
+                if path.is_file() {
+                        return path;
                 }
         }
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir)
+        real_user_dir().join("settings.toml")
+}
+
+pub fn active_settings_path() -> PathBuf {
+        settings_path()
+}
+
+fn real_user_dir() -> PathBuf {
+        known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData, windows::Win32::UI::Shell::KF_FLAG_NO_PACKAGE_REDIRECTION)
+                .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+                .unwrap_or_else(std::env::temp_dir)
+                .join("RCantonese")
+}
+
+fn known_folder(id: &windows::core::GUID, flags: windows::Win32::UI::Shell::KNOWN_FOLDER_FLAG) -> Option<PathBuf> {
+        unsafe {
+                let raw = windows::Win32::UI::Shell::SHGetKnownFolderPath(id, flags, None).ok()?;
+                let path = raw.to_string().unwrap_or_default();
+                windows::Win32::System::Com::CoTaskMemFree(Some(raw.as_ptr() as *const std::ffi::c_void));
+                if path.is_empty() { None } else { Some(PathBuf::from(path)) }
+        }
+}
+
+fn registry_user_dir() -> Option<PathBuf> {
+        use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ};
+        unsafe {
+                let mut key = Default::default();
+                if RegOpenKeyExW(HKEY_CURRENT_USER, windows::core::w!("Software\\RCantonese"), None, KEY_READ, &mut key).is_err() {
+                        return None;
+                }
+                let mut buf = [0u16; 260];
+                let mut len = (buf.len() * 2) as u32;
+                let mut kind = Default::default();
+                let status = RegQueryValueExW(key, windows::core::w!("UserDir"), None, Some(&mut kind), Some(buf.as_mut_ptr() as *mut u8), Some(&mut len));
+                let _ = RegCloseKey(key);
+                if status.is_err() || len < 2 {
+                        return None;
+                }
+                let chars = (len as usize / 2).saturating_sub(1);
+                let text = String::from_utf16_lossy(&buf[..chars]);
+                let text = text.trim_end_matches('\0');
+                if text.is_empty() { None } else { Some(PathBuf::from(text)) }
+        }
+}
+
+/// Record the absolute directory, the same way Weasel records `RimeUserDir`.
+pub fn remember_user_dir() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ};
+        let dir = real_user_dir();
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        unsafe {
+                let mut key = Default::default();
+                if RegCreateKeyExW(
+                        HKEY_CURRENT_USER,
+                        windows::core::w!("Software\\RCantonese"),
+                        None,
+                        None,
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_SET_VALUE,
+                        None,
+                        &mut key,
+                        None,
+                )
+                .is_err()
+                {
+                        return;
+                }
+                let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+                let _ = RegSetValueExW(key, windows::core::w!("UserDir"), None, REG_SZ, Some(bytes));
+                let _ = RegCloseKey(key);
+        }
 }
 
 fn input_method_mode_name(mode: InputMethodMode) -> &'static str {
@@ -252,6 +312,7 @@ pub fn load() -> ImeSettings {
         let Ok(content) = std::fs::read_to_string(&path) else {
                 return settings;
         };
+        remember_user_dir();
         let mut hotkeys: Vec<(u32, u32)> = Vec::new();
         for line in content.lines() {
                 let line = strip_comment(line);
@@ -398,10 +459,11 @@ pub fn save(settings: &ImeSettings) -> std::io::Result<()> {
                 quote(&settings.ui_language),
                 settings.display_tray_icon,
         );
-        if let Err(e) = std::fs::write(&path, content) {
+        if let Err(e) = std::fs::write(&path, &content) {
                 globals::log_error(&format!("config save failed: {e:?}"));
                 return Err(e);
         }
+        remember_user_dir();
         Ok(())
 }
 
