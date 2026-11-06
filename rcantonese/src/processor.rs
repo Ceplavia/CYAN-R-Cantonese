@@ -110,15 +110,13 @@ pub struct Processor {
 
         is_applying_settings: bool,
         is_mirroring_conversion: bool,
-        /// mtime of settings.toml when `settings` was last loaded — lets
-        /// long-lived processes notice another process's save.
-        settings_mtime: Option<std::time::SystemTime>,
+        /// Identity of the settings document last applied. The tray serves
+        /// that document to packaged hosts, which cannot see the file's mtime.
+        settings_token: Option<u64>,
 }
 
-fn current_settings_mtime() -> Option<std::time::SystemTime> {
-        std::fs::metadata(crate::config::active_settings_path())
-                .and_then(|m| m.modified())
-                .ok()
+fn current_settings_token() -> Option<u64> {
+        crate::config::settings_token()
 }
 
 /// Save settings without leaking per-window runtime state:
@@ -159,7 +157,7 @@ impl Processor {
                         selected_memory: Vec::new(),
                         is_applying_settings: false,
                         is_mirroring_conversion: false,
-                        settings_mtime: current_settings_mtime(),
+                        settings_token: current_settings_token(),
                 };
 
                 let _thread_unknown: IUnknown = thread_mgr.cast().ok()?;
@@ -905,22 +903,22 @@ impl Processor {
         /// The character variant is per-window runtime state — it survives
         /// the reload (a new window reads the toml default at activation).
         pub fn sync_settings_if_changed(&mut self, thread_mgr: &ITfThreadMgr) {
-                let mtime = current_settings_mtime();
-                if mtime == self.settings_mtime {
+                let token = current_settings_token();
+                if token == self.settings_token {
                         return;
                 }
-                self.settings_mtime = mtime;
+                self.settings_token = token;
                 self.apply_persisted_settings(thread_mgr);
         }
 
         /// Field-level reload for display paths (menu snapshot) — skips
         /// compartment work.
         pub fn sync_settings_fields(&mut self) {
-                let mtime = current_settings_mtime();
-                if mtime == self.settings_mtime {
+                let token = current_settings_token();
+                if token == self.settings_token {
                         return;
                 }
-                self.settings_mtime = mtime;
+                self.settings_token = token;
                 let variant = self.settings.character_variant;
                 let mode = self.settings.input_method_mode;
                 self.settings = load_settings();

@@ -13,10 +13,11 @@ use crate::globals;
 use crate::settings::{CharacterForm, ImeSettings, InputMethodMode, PunctuationForm};
 use crate::variants::CharacterVariant;
 
-/// One settings file. Weasel stores the expanded absolute user directory in
-/// `HKCU\Software\Rime\Weasel\RimeUserDir` and every component reads that.
-/// `%LOCALAPPDATA%` inside Start/Search is a private folder, so the path has
-/// to be the real directory, not the environment variable.
+/// One settings file. Start and Search virtualize both `%LOCALAPPDATA%` and
+/// `HKCU`, so those processes cannot open it. The tray (a normal process,
+/// the same role as WeaselServer) reads the real file and serves the bytes
+/// on `\\.\pipe\RCantonese.Settings`. Desktop processes still read the file
+/// directly when the tray is not running.
 pub fn settings_path() -> PathBuf {
         if let Some(dir) = registry_user_dir() {
                 let path = dir.join("settings.toml");
@@ -303,16 +304,108 @@ pub fn hotkey_to_spec(vk: u32, modifiers: u32) -> String {
 
 // -- load / save -----------------------------------------------------------
 
-/// Load settings from the TOML file; falls back to defaults for missing or
-/// unknown values. Unknown keys are ignored so newer configs don't break
-/// older builds.
+const SETTINGS_PIPE: windows::core::PCWSTR = windows::core::w!("\\\\.\\pipe\\RCantonese.Settings");
+
+struct CachedDocument {
+        text: String,
+        at: std::time::Instant,
+}
+
+static DOCUMENT: std::sync::Mutex<Option<CachedDocument>> = std::sync::Mutex::new(None);
+
+/// True when the tray served a document or the local file is readable.
+/// A miss is not cached, so a tray that starts later is picked up.
+pub fn has_document() -> bool {
+        fetch_document().is_some()
+}
+
+/// Identity of the current document. Focus handling compares this so a
+/// packaged host reloads when the tray starts serving the real file.
+pub fn settings_token() -> Option<u64> {
+        fetch_document().map(|text| {
+                let mut hash = 0xcbf29ce484222325u64;
+                for byte in text.as_bytes() {
+                        hash ^= *byte as u64;
+                        hash = hash.wrapping_mul(0x100000001b3);
+                }
+                hash
+        })
+}
+
+fn fetch_document() -> Option<String> {
+        if let Some(hit) = fresh_document() {
+                return Some(hit);
+        }
+        if let Some(text) = read_settings_pipe() {
+                store_document(&text);
+                return Some(text);
+        }
+        let path = settings_path();
+        let text = std::fs::read_to_string(&path).ok()?;
+        remember_user_dir();
+        store_document(&text);
+        Some(text)
+}
+
+fn fresh_document() -> Option<String> {
+        let guard = DOCUMENT.lock().unwrap_or_else(|e| e.into_inner());
+        let cached = guard.as_ref()?;
+        if cached.at.elapsed() < std::time::Duration::from_millis(400) {
+                Some(cached.text.clone())
+        } else {
+                None
+        }
+}
+
+fn store_document(text: &str) {
+        let mut guard = DOCUMENT.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(CachedDocument { text: text.to_string(), at: std::time::Instant::now() });
+}
+
+/// Ask the tray for the real settings.toml. Start/Search cannot open the
+/// file themselves. A missing tray returns immediately.
+fn read_settings_pipe() -> Option<String> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::Storage::FileSystem::{CreateFileW, ReadFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING};
+        use windows::Win32::System::Pipes::WaitNamedPipeW;
+        unsafe {
+                for _ in 0..2 {
+                        if !WaitNamedPipeW(SETTINGS_PIPE, 50).as_bool() {
+                                return None;
+                        }
+                        let Ok(handle) = CreateFileW(SETTINGS_PIPE, 0x8000_0000, FILE_SHARE_READ, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None) else {
+                                continue;
+                        };
+                        let mut body = Vec::new();
+                        let mut chunk = [0u8; 4096];
+                        loop {
+                                let mut read = 0u32;
+                                if ReadFile(handle, Some(&mut chunk), Some(&mut read), None).is_err() || read == 0 {
+                                        break;
+                                }
+                                body.extend_from_slice(&chunk[..read as usize]);
+                                if body.len() > 256 * 1024 {
+                                        break;
+                                }
+                        }
+                        let _ = CloseHandle(handle);
+                        if body.is_empty() {
+                                return None;
+                        }
+                        return String::from_utf8(body).ok();
+                }
+        }
+        None
+}
+
+/// Load settings from the tray or the TOML file. Missing and unknown values
+/// stay at the defaults. Unknown keys are ignored so newer configs don't
+/// break older builds.
 pub fn load() -> ImeSettings {
         let mut settings = ImeSettings::default();
-        let path = settings_path();
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Some(content) = fetch_document() else {
                 return settings;
         };
-        remember_user_dir();
         let mut hotkeys: Vec<(u32, u32)> = Vec::new();
         for line in content.lines() {
                 let line = strip_comment(line);
@@ -470,6 +563,38 @@ pub fn save(settings: &ImeSettings) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
         use super::*;
+
+        #[test]
+        fn pipe_serves_settings_the_file_cannot() {
+                use windows::Win32::Foundation::CloseHandle;
+                use windows::Win32::Storage::FileSystem::{WriteFile, PIPE_ACCESS_OUTBOUND};
+                use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES};
+                let body = b"ui_language = \"en\"\noptions_menu_keys = [\"f4\"]\n";
+                let server = std::thread::spawn(move || unsafe {
+                        let pipe = CreateNamedPipeW(SETTINGS_PIPE, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, None);
+                        if pipe.is_invalid() {
+                                return;
+                        }
+                        let _ = ConnectNamedPipe(pipe, None);
+                        let mut wrote = 0u32;
+                        let _ = WriteFile(pipe, Some(body), Some(&mut wrote), None);
+                        let _ = DisconnectNamedPipe(pipe);
+                        let _ = CloseHandle(pipe);
+                });
+                let mut text = None;
+                let start = std::time::Instant::now();
+                while start.elapsed() < std::time::Duration::from_secs(2) {
+                        if let Some(got) = read_settings_pipe() {
+                                text = Some(got);
+                                break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let _ = server.join();
+                // Distinct from the on-disk file (zh, and more than one hotkey)
+                // so a file fallback cannot satisfy this.
+                assert_eq!(text.as_deref(), Some("ui_language = \"en\"\noptions_menu_keys = [\"f4\"]\n"));
+        }
 
         #[test]
         fn hotkey_parse() {

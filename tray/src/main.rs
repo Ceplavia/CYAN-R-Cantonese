@@ -26,6 +26,8 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+mod settings_server;
+
 const WM_TRAY_ICON: u32 = WM_APP + 40; // tray callback
 const WM_TRAY_SETMODE: u32 = WM_APP + 41; // wParam: 1 = zh, 0 = abc
 const WM_TRAY_QUIT: u32 = WM_APP + 42;
@@ -975,6 +977,7 @@ fn main() {
                         let _ = PostMessageW(Some(w), WM_TRAY_QUIT, WPARAM(0), LPARAM(0));
                 }
                 log(&format!("tray.exe: started hwnd={:?}", hwnd));
+                settings_server::start();
                 queue_first_run_hint();
                 let _ = SetTimer(Some(hwnd), PRUNE_TIMER_ID, 4000, None);
                 let mut msg = MSG::default();

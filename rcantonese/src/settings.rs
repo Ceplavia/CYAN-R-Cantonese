@@ -193,10 +193,11 @@ fn load_settings_from_registry() -> ImeSettings {
         settings
 }
 
-/// Load settings: TOML first, then migrate registry values on first run.
+/// Load settings: the tray server or the TOML file, then migrate registry
+/// values on first run. Packaged hosts have no visible file, so the server
+/// has to win before the "file missing" registry fallback.
 pub fn load_settings() -> ImeSettings {
-        let path = crate::config::settings_path();
-        if path.exists() {
+        if crate::config::has_document() {
                 return crate::config::load();
         }
         let settings = load_settings_from_registry();
