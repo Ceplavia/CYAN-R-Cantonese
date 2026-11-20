@@ -22,7 +22,6 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_reactor::*;
 
 const WM_TRAY_RELOAD: u32 = WM_APP + 45; // must match tray.rs
-const WM_TRAY_NOTIFY: u32 = WM_APP + 46; // must match tray.rs — balloon (wParam: 1=applied, 2=reloaded, 3=memory cleared)
 const WM_TRAY_CLEARMEM: u32 = WM_APP + 47; // must match tray.rs — delete all learned words
 
 const CLSID_RCANTONESE: windows::core::GUID =
@@ -128,31 +127,6 @@ fn disable_window_maximize() {
         }
 }
 
-/// Tray balloon — kind: 1 = applied, 2 = reloaded.
-fn broadcast_notify(kind: usize) {
-        broadcast(WM_TRAY_NOTIFY, WPARAM(kind));
-}
-
-/// Free-text tray balloon via WM_COPYDATA to r-cantonese-tray.exe directly.
-fn notify_text(text: &str) {
-        use windows::Win32::System::DataExchange::COPYDATASTRUCT;
-        unsafe {
-                let Ok(hwnd) = FindWindowW(windows::core::w!("RCantoneseTrayIconWnd"), PCWSTR::null()) else {
-                        return;
-                };
-                if hwnd.is_invalid() {
-                        return;
-                }
-                let mut data: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-                let cds = COPYDATASTRUCT {
-                        dwData: 1,
-                        cbData: (data.len() * 2) as u32,
-                        lpData: data.as_mut_ptr() as *mut _,
-                };
-                let _ = SendMessageW(hwnd, WM_COPYDATA, Some(WPARAM(0)), Some(LPARAM(&cds as *const _ as isize)));
-        }
-}
-
 // -- locale install ---------------------------------------------------------
 
 fn installed_dll_path() -> Option<Vec<u16>> {
@@ -250,7 +224,6 @@ struct ConfigCenter {
         select_color: String,
         comment_color: String,
         hotkeys: String,
-        tray_icon: bool,
         status: String,
 }
 
@@ -280,7 +253,6 @@ impl ConfigCenter {
                                 .map(|&(vk, m)| config::hotkey_to_spec(vk, m))
                                 .collect::<Vec<_>>()
                                 .join(", "),
-                        tray_icon: s.display_tray_icon,
                         status: String::new(),
                 }
         }
@@ -314,7 +286,6 @@ impl ConfigCenter {
                         s.options_menu_keys = keys;
                 }
                 s.ui_language = ["auto", "en", "zh"][self.ui_lang].to_string();
-                s.display_tray_icon = self.tray_icon;
                 s
         }
 
@@ -429,7 +400,6 @@ enum Msg {
         Hotkeys(String),
         StartCapture,
         CaptureDone,
-        TrayIcon(bool),
 }
 
 impl Component for ConfigCenter {
@@ -450,9 +420,13 @@ impl Component for ConfigCenter {
                                 match config::save(&s) {
                                         Ok(()) => {
                                                 broadcast_reload();
-                                                broadcast_notify(1);
+                                                self.status = self.t("Settings applied.", "設定已套用。");
+                                                notify_windows(&self.status);
                                         }
-                                        Err(e) => notify_text(&format!("{}: {e}", self.t("Save failed", "儲存失敗"))),
+                                        Err(e) => {
+                                                self.status = format!("{}: {e}", self.t("Save failed", "儲存失敗"));
+                                                notify_windows(&self.status);
+                                        }
                                 }
                         }
                         Msg::InstallLocale => {
@@ -487,8 +461,8 @@ impl Component for ConfigCenter {
                         }
                         Msg::ClearMemory => {
                                 broadcast(WM_TRAY_CLEARMEM, WPARAM(0));
-                                broadcast_notify(3);
                                 self.status = self.t("Learning records cleared.", "已清除學習記錄。");
+                                notify_windows(&self.status);
                         }
                         Msg::UiLang(v) => self.ui_lang = v.unwrap_or(0),
                         Msg::Locale(v) => self.locale_index = v.unwrap_or(0),
@@ -507,7 +481,6 @@ impl Component for ConfigCenter {
                                 self.select_color = config::color_to_hex(d.candidate_select_color);
                                 self.comment_color = config::color_to_hex(d.candidate_comment_color);
                         }
-                        Msg::TrayIcon(v) => self.tray_icon = v,
                         Msg::Hotkeys(s) => self.hotkeys = s,
                         Msg::StartCapture => {
                                 self.capturing = true;
@@ -689,21 +662,6 @@ impl Component for ConfigCenter {
                                         TextBlock::new().text_wrapping(TextWrapping::Wrap).text(self.t(
                                                 "Switching unregisters the old profile first. Requires administrator rights.",
                                                 "切換語言會先取消註冊舊 profile，再註冊新嘅。需要管理員權限。",
-                                        )),
-                                        StackPanel::new()
-                                                .orientation(Orientation::Horizontal)
-                                                .spacing(8.0)
-                                                .children((
-                                                        label(&self.t("Tray icon", "托盤圖標")),
-                                                        View::from(
-                                                                ToggleSwitch::new()
-                                                                        .is_on(self.tray_icon)
-                                                                        .on_toggled(context.callback(Msg::TrayIcon)),
-                                                        ),
-                                                )),
-                                        TextBlock::new().text_wrapping(TextWrapping::Wrap).text(self.t(
-                                                "Off by default — the 中/A button beside the input-mode indicator is the main icon. Turn on for an extra standalone tray icon.",
-                                                "默認關閉 — 輸入法圖標隔籬嘅「中/A」掣先係主圖標。開咗會多個獨立托盤圖標。",
                                         )),
                                         Button::new().on_click(context.message(Msg::ClearMemory)).content(self.t("Clear learning records", "清除學習記錄")),
                                         TextBlock::new().text_wrapping(TextWrapping::Wrap).text(self.t(
@@ -1036,7 +994,32 @@ fn user_has_language(langid: u16) -> bool {
         }
 }
 
+// 21H2 binds api-ms-win-appmodel-runtime-l1-1-5 to a host that does not
+// export these symbols. The self-contained app does not call them; if a
+// path does, return E_NOTIMPL instead of the system entry-point dialog.
+unsafe extern "system" fn unavailable_package_dependency() -> i32 {
+        0x80004001u32 as i32
+}
+
+unsafe extern "system" fn delay_failure_hook(notify: u32, _info: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+        // dliFailGetProc
+        if notify == 4 {
+                return unavailable_package_dependency as *mut core::ffi::c_void;
+        }
+        core::ptr::null_mut()
+}
+
+fn install_downlevel_hook() {
+        unsafe extern "C" {
+                static mut __pfnDliFailureHook2: usize;
+        }
+        unsafe {
+                __pfnDliFailureHook2 = delay_failure_hook as *const () as usize;
+        }
+}
+
 fn main() {
+        install_downlevel_hook();
         // Elevated helper mode: config-center.exe --install-locale <langid>
         let args: Vec<String> = std::env::args().collect();
         if let Some(pos) = args.iter().position(|a| a == "--install-locale") {
@@ -1058,5 +1041,97 @@ fn main() {
                         std::process::exit(code);
                 }
         }
+        register_toast_identity();
         App::run_component::<ConfigCenter>(()).unwrap();
+}
+
+/// Windows toast needs an AppUserModelID that a Start-menu shortcut
+/// already carries. No notification-area icon is involved.
+const TOAST_AUMID: &str = "RCantonese.ConfigCenter";
+
+fn register_toast_identity() {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                let _ = ensure_toast_shortcut();
+                let wide: Vec<u16> = TOAST_AUMID.encode_utf16().chain(std::iter::once(0)).collect();
+                let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR(wide.as_ptr()));
+        }
+}
+
+fn notify_windows(body: &str) {
+        let _ = show_toast("R-Cantonese", body);
+}
+
+fn show_toast(title: &str, body: &str) -> windows::core::Result<()> {
+        use windows::Data::Xml::Dom::XmlDocument;
+        use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+        use windows::core::HSTRING;
+        let xml = format!(
+                "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+                xml_escape(title),
+                xml_escape(body),
+        );
+        let doc = XmlDocument::new()?;
+        doc.LoadXml(&HSTRING::from(xml))?;
+        let toast = ToastNotification::CreateToastNotification(&doc)?;
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(TOAST_AUMID))?.Show(&toast)
+}
+
+fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+windows_link::link!("propsys.dll" "system" fn InitPropVariantFromString(psz: windows::core::PCWSTR, ppropvar: *mut windows::Win32::System::Com::StructuredStorage::PROPVARIANT) -> windows::core::HRESULT);
+
+fn ensure_toast_shortcut() -> windows::core::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::{E_FAIL, PROPERTYKEY};
+        use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PropVariantClear};
+        use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile};
+        use windows::core::Interface;
+        use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+        use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        let mut exe_buf = [0u16; 1024];
+        let n = unsafe { GetModuleFileNameW(None, &mut exe_buf) } as usize;
+        if n == 0 {
+                return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        let exe = String::from_utf16_lossy(&exe_buf[..n]);
+        let dir = exe.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Some(appdata) = std::env::var_os("APPDATA") else {
+                return Err(windows::core::Error::from_hresult(E_FAIL));
+        };
+        let folder = std::path::PathBuf::from(appdata)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+                .join("R-Cantonese");
+        std::fs::create_dir_all(&folder).map_err(|_| windows::core::Error::from_hresult(E_FAIL))?;
+        let lnk = folder.join("配置中心.lnk");
+        let lnk_wide: Vec<u16> = lnk.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        unsafe {
+                let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+                link.SetPath(PCWSTR(exe_buf.as_ptr()))?;
+                let dir_wide: Vec<u16> = dir.encode_utf16().chain(std::iter::once(0)).collect();
+                link.SetWorkingDirectory(PCWSTR(dir_wide.as_ptr()))?;
+                link.SetIconLocation(PCWSTR(exe_buf.as_ptr()), 0)?;
+                let store: IPropertyStore = link.cast()?;
+                let key = PROPERTYKEY {
+                        fmtid: windows::core::GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3),
+                        pid: 5,
+                };
+                let mut prop = PROPVARIANT::default();
+                let aumid: Vec<u16> = TOAST_AUMID.encode_utf16().chain(std::iter::once(0)).collect();
+                InitPropVariantFromString(PCWSTR(aumid.as_ptr()), &mut prop).ok()?;
+                store.SetValue(&key, &prop)?;
+                store.Commit()?;
+                let _ = PropVariantClear(&mut prop);
+                let file: IPersistFile = link.cast()?;
+                file.Save(PCWSTR(lnk_wide.as_ptr()), true)?;
+        }
+        Ok(())
 }

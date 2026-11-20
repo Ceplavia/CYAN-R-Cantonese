@@ -1,5 +1,2 @@
-// Icon resources shared with the IME DLL (same numeric ids), plus the app
-// manifest — without declared supportedOS, Shell_NotifyIcon may fail.
+// App manifest — declares supportedOS for the user-session helper.
 1 RT_MANIFEST "tray.manifest"
-21 ICON "..\\rcantonese\\resources\\zh.ico"
-23 ICON "..\\rcantonese\\resources\\en.ico"

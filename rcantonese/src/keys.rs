@@ -71,6 +71,10 @@ fn last_output_was_ascii_digit() -> bool {
                 .is_some_and(|c| (u16::from(b'0')..=u16::from(b'9')).contains(&c))
 }
 
+fn is_ascii_or_fullwidth_digit(c: u16) -> bool {
+        (u16::from(b'0')..=u16::from(b'9')).contains(&c) || (0xFF10..=0xFF19).contains(&c)
+}
+
 /// Whether Caps Lock is toggled on — the IME treats it as English mode:
 /// keys pass through untouched and the mode indicator shows "A".
 pub(crate) fn caps_lock_on() -> bool {
@@ -834,8 +838,13 @@ fn handle_punctuation_key(state: &mut ServiceState, ec: u32, context: &ITfContex
         // after an ASCII digit stays half-width. Synthetic stores (bridge
         // hosts) can't be read back — fall back to the last char we emitted.
         let prev_is_digit = match prev_doc_char(ec, context) {
-                Some(c) => (u16::from(b'0')..=u16::from(b'9')).contains(&c),
-                None => last_output_was_ascii_digit(),
+                Some(c) if is_ascii_or_fullwidth_digit(c) => true,
+                // A real non-digit in the document wins ("3a." stays "。").
+                // Some(0) is either the start of the document or a store
+                // that refuses to move (WeChat). The latter still has the
+                // digit we just passed through.
+                Some(c) if c != 0 => false,
+                _ => last_output_was_ascii_digit(),
         };
         let action = crate::punctuation::decide(code, is_shifting, is_cantonese, prev_is_digit);
         match action {

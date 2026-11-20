@@ -1,16 +1,7 @@
-// Session tray icon, Weasel-style: the icon lives in r-cantonese-tray.exe —
-// a standalone process, never inside an injected process. This module only
-// spawns it on demand and posts state messages to its window.
-//
-// Visibility protocol: each process posts WM_TRAY_SHOW (its pid) while the
-// foreground thread uses our IME and WM_TRAY_HIDE when it stops. The tray
-// exe keeps a pid set — the icon shows while the set is non-empty and dead
-// pids are pruned on a timer, so process death can never zombie the icon.
-//
-// Clicks travel the other way: the tray exe posts WM_TRAY_TOGGLE /
-// WM_TRAY_MENU to every host window (RCantoneseTrayHostWnd, one per
-// process); the focused one answers. Settings broadcasts (reload, notify,
-// clear-memory) go to all hosts.
+// Spawns r-cantonese-tray.exe (settings pipe, tip repair) and keeps a
+// per-process message window. The 中/A button is the langbar item, not a
+// notification-area icon. Settings broadcasts (reload, clear-memory) go
+// to every host window.
 
 #![allow(dead_code)]
 
@@ -26,22 +17,14 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::globals;
 use crate::processor::Processor;
 
-const WM_TRAY_SETMODE: u32 = WM_APP + 41; // wParam: 1 = zh, 0 = abc
 const WM_TRAY_QUIT: u32 = WM_APP + 42; // worker: quit (stale in-process workers)
-const WM_TRAY_TOGGLE: u32 = WM_APP + 43; // host windows: toggle zh/abc
-const WM_TRAY_MENU: u32 = WM_APP + 44; // host windows: show settings menu
 const WM_TRAY_RELOAD: u32 = WM_APP + 45; // host windows: reload settings.toml
-const WM_TRAY_NOTIFY: u32 = WM_APP + 46; // host windows: balloon (wParam: 1=applied, 2=reloaded, 3=memory cleared)
 const WM_TRAY_CLEARMEM: u32 = WM_APP + 47; // host windows: delete all learned words
-const WM_TRAY_PING: u32 = WM_APP + 48; // liveness probe — returns TRAY_MAGIC
-const WM_TRAY_SHOW: u32 = WM_APP + 50; // wParam = pid — IME active+foreground
 const WM_TRAY_HIDE: u32 = WM_APP + 51; // wParam = pid — IME no longer current
 const WM_LANGBAR_REFRESH: u32 = WM_APP + 52; // host windows: deferred langbar icon refresh
 const WM_SHOW_SETTINGS_MENU: u32 = WM_APP + 53; // host windows: deferred right-click menu
 const WM_DEFERRED_UI: u32 = WM_APP + 54; // host windows: deferred candidate UI-element ops
 const WM_OPTIONS_MENU: u32 = WM_APP + 55; // host windows: Ctrl+` seen by the thread hook
-const TRAY_MAGIC: isize = 0x5243; // 'RC'
-
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
 const HOST_WND_CLASS: PCWSTR = w!("RCantoneseTrayHostWnd");
 
@@ -51,7 +34,6 @@ static TRAY: Mutex<TrayState> = Mutex::new(TrayState::new());
 // live in a static Mutex.
 struct TrayState {
         host_hwnd: isize,
-        shown_mode_is_zh: bool,
         shutting_down: bool,
         has_thread_focus: bool,
 }
@@ -60,7 +42,6 @@ impl TrayState {
         const fn new() -> Self {
                 Self {
                         host_hwnd: 0,
-                        shown_mode_is_zh: true,
                         shutting_down: false,
                         has_thread_focus: false,
                 }
@@ -80,9 +61,9 @@ fn raw(hwnd: HWND) -> isize {
 // ---------------------------------------------------------------------
 
 /// Called when the IME becomes the active profile in this process. Ensures
-/// the host window exists (created on the calling UI thread so clicks
-/// dispatch into our own message loop), then shows the icon when this
-/// thread is the foreground one.
+/// the host window exists (created on the calling UI thread so messages
+/// dispatch into our own message loop), then starts the user-session helper
+/// when this thread is the foreground one.
 pub fn activate(processor: &Weak<Mutex<Processor>>) {
         let mut tray = TRAY.lock().unwrap_or_else(|e| e.into_inner());
         tray.shutting_down = false;
@@ -110,8 +91,7 @@ pub fn activate(processor: &Weak<Mutex<Processor>>) {
         }
 }
 
-/// Called on deactivation: hides the icon for this process and tears the
-/// host window down.
+/// Called on deactivation: tears the host window down.
 pub fn deactivate() {
         let mut tray = TRAY.lock().unwrap_or_else(|e| e.into_inner());
         tray.shutting_down = true;
@@ -127,7 +107,7 @@ pub fn deactivate() {
 }
 
 /// Called from ITfThreadFocusSink::OnSetThreadFocus — this thread's IME
-/// instance is now the foreground input method, so the icon should show.
+/// instance is now the foreground input method, so start the helper.
 pub fn thread_focus_gained() {
         let mut tray = TRAY.lock().unwrap_or_else(|e| e.into_inner());
         tray.has_thread_focus = true;
@@ -137,10 +117,8 @@ pub fn thread_focus_gained() {
 }
 
 /// Called from ITfThreadFocusSink::OnKillThreadFocus — the foreground moved
-/// to another thread. Hide immediately: if that thread also uses our IME its
-/// own OnSetThreadFocus re-shows the icon; if it uses another IME the icon
-/// must go (it's a "current IME" indicator). Tray clicks don't move keyboard
-/// focus, so interacting with the icon never triggers this.
+/// to another thread. The helper process stays up; this only drops the
+/// per-thread "we are focused" flag.
 pub fn thread_focus_lost() {
         let mut tray = TRAY.lock().unwrap_or_else(|e| e.into_inner());
         tray.has_thread_focus = false;
@@ -288,19 +266,16 @@ unsafe extern "system" fn refresh_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM,
         }
 }
 
-/// Update the tray icon's zh/abc state. Finds the tray window by class and
-/// posts to it — works from any process.
-pub fn update_mode(is_zh: bool) {
-        {
-                let mut tray = TRAY.lock().unwrap_or_else(|e| e.into_inner());
-                tray.shown_mode_is_zh = is_zh;
-                if tray.host_hwnd != 0 && tray.has_thread_focus {
-                        // Foreground IME host — make sure the icon exists.
-                        drop(tray);
-                        show_tray_icon();
-                }
+/// Make sure the user-session helper is running while this thread has focus.
+/// The langbar item draws 中/A itself; this no longer updates a tray icon.
+pub fn update_mode(_is_zh: bool) {
+        let focused = {
+                let tray = TRAY.lock().unwrap_or_else(|e| e.into_inner());
+                tray.host_hwnd != 0 && tray.has_thread_focus
+        };
+        if focused {
+                show_tray_icon();
         }
-        post_to_tray(WM_TRAY_SETMODE, WPARAM(is_zh as usize), LPARAM(0));
 }
 
 // ---------------------------------------------------------------------
@@ -368,15 +343,10 @@ fn find_tray_window() -> Option<HWND> {
         found
 }
 
-/// Mark this process's IME as the current input method. If the tray exe
-/// isn't up yet we spawn it on a background thread — never block the host
-/// app's UI thread waiting for it.
+/// Start the user-session helper if it is not already running. Never block
+/// the host app's UI thread waiting for it.
 fn show_tray_icon() {
-        let my_pid = unsafe { GetCurrentProcessId() };
         if find_tray_window().is_some() {
-                post_to_tray(WM_TRAY_SHOW, WPARAM(my_pid as usize), LPARAM(0));
-                let is_zh = TRAY.lock().unwrap_or_else(|e| e.into_inner()).shown_mode_is_zh;
-                post_to_tray(WM_TRAY_SETMODE, WPARAM(is_zh as usize), LPARAM(0));
                 return;
         }
         // One spawn attempt per process — packaged hosts (appcontainer) can
@@ -389,13 +359,9 @@ fn show_tray_icon() {
                 if !spawn_tray_exe() {
                         return;
                 }
-                // Wait for the worker's window, then post the show.
                 for _ in 0..20 {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         if find_tray_window().is_some() {
-                                post_to_tray(WM_TRAY_SHOW, WPARAM(my_pid as usize), LPARAM(0));
-                                let is_zh = TRAY.lock().unwrap_or_else(|e| e.into_inner()).shown_mode_is_zh;
-                                post_to_tray(WM_TRAY_SETMODE, WPARAM(is_zh as usize), LPARAM(0));
                                 return;
                         }
                 }
@@ -540,43 +506,6 @@ fn host_processor(hwnd: HWND) -> Option<std::sync::Arc<Mutex<Processor>>> {
 unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         unsafe {
                 match msg {
-                        WM_TRAY_TOGGLE => {
-                                globals::guarded_value("tray toggle", LRESULT(0), || {
-                                        if let Some(processor) = host_processor(hwnd) {
-                                                if let Ok(thread_mgr) = windows::Win32::System::Com::CoCreateInstance::<Option<_>, ITfThreadMgr>(
-                                                        &CLSID_TF_ThreadMgr,
-                                                        None,
-                                                        windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
-                                                ) {
-                                                        if let Ok(mut p) = processor.lock() {
-                                                                let _ = p.toggle_input_method_mode(&thread_mgr);
-                                                        }
-                                                }
-                                        }
-                                        LRESULT(0)
-                                })
-                        }
-                        WM_TRAY_MENU => {
-                                globals::guarded_value("tray menu", LRESULT(0), || {
-                                        // tray.exe targets ONE host by pid —
-                                        // broadcasting let every injected
-                                        // process race to pop a menu.
-                                        if wparam.0 as u32 != GetCurrentProcessId() {
-                                                return LRESULT(0);
-                                        }
-                                        // The shell granted tray.exe
-                                        // foreground rights and it passed them
-                                        // to us — claim foreground so the popup
-                                        // menu doesn't dismiss instantly.
-                                        let _ = SetForegroundWindow(hwnd);
-                                        if let Some(processor) = host_processor(hwnd) {
-                                                let mut pt = POINT::default();
-                                                let _ = GetCursorPos(&mut pt);
-                                                crate::langbar::show_settings_menu_at(pt, &processor);
-                                        }
-                                        LRESULT(0)
-                                })
-                        }
                         WM_TRAY_RELOAD => {
                                 // Broadcast by the config center after writing
                                 // settings.toml — reload and apply.
@@ -594,12 +523,6 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                                         }
                                         LRESULT(0)
                                 })
-                        }
-                        WM_TRAY_NOTIFY => {
-                                // Relay to the tray exe — post it onward so
-                                // the balloon shows on the icon.
-                                post_to_tray(WM_TRAY_NOTIFY, wparam, lparam);
-                                LRESULT(0)
                         }
                         WM_TRAY_CLEARMEM => {
                                 // Config-center "clear learning" — wipe the
@@ -635,12 +558,6 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
 /// Broadcast a settings reload to every active IME host window.
 pub fn broadcast_reload() {
         broadcast_to_hosts(WM_TRAY_RELOAD, WPARAM(0), LPARAM(0));
-}
-
-/// Broadcast a tray balloon request — kind: 1 = applied, 2 = reloaded,
-/// 3 = learning data cleared.
-pub fn broadcast_notify(kind: usize) {
-        broadcast_to_hosts(WM_TRAY_NOTIFY, WPARAM(kind), LPARAM(0));
 }
 
 /// Broadcast a clear-learned-words request to every active IME host window.

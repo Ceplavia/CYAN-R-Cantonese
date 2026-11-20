@@ -628,7 +628,7 @@ fn move_candidate_to(hwnd: HWND, window_state: &std::sync::Arc<Mutex<CandidateWi
 /// Geometryless hosts (Sticky Notes, Start) return the whole text view
 /// once the composition is longer than one character, and the list then
 /// jumps to the bottom of the note. The caret is the top of that box.
-fn anchor_rect(view: &ITfContextView, ec: u32, range: &ITfRange) -> Result<Option<RECT>> {
+fn anchor_rect(view: &ITfContextView, ec: u32, range: &ITfRange, host_draws: bool) -> Result<Option<RECT>> {
         let mut full = RECT::default();
         let mut clipped = BOOL(0);
         unsafe { view.GetTextExt(ec, range, &mut full, &mut clipped)? };
@@ -641,16 +641,18 @@ fn anchor_rect(view: &ITfContextView, ec: u32, range: &ITfRange) -> Result<Optio
                 full.right = full.left;
                 full.bottom = full.top;
         }
-        Ok(resolve_text_ext(full))
+        Ok(resolve_text_ext(full, host_draws))
 }
 
-/// `None` means a real CUAS/IMM bridge (hide our window). `Some` is a rect
-/// the candidate window should be moved to.
-fn resolve_text_ext(rect: RECT) -> Option<RECT> {
+/// `None` means a host that both returned no line box and claimed the
+/// candidate UI (hide our window). `Some` is a rect to move our window to.
+/// A zero-height rect with nobody claiming the UI is a missing caret, not a
+/// bridge — place the list with the degenerate-anchor fallback.
+fn resolve_text_ext(rect: RECT, host_draws: bool) -> Option<RECT> {
         if rect.top != rect.bottom {
                 return Some(rect);
         }
-        if !geometryless_host() {
+        if !geometryless_host() && host_draws {
                 return None;
         }
         Some(anchor_for_degenerate(rect))
@@ -729,12 +731,13 @@ pub struct CandidateListPresenter {
         service: IUnknown,
         page_size: usize,
         hide_window: bool,
-        /// Set when GetTextExt reports a degenerate rect — the signature of a
-        /// cicero-unaware (CUAS/IMM bridge) host that can't position UI. The
-        /// bridge already hands the app a standard CANDIDATELIST (games draw
-        /// it in-engine; classic apps get the system IME window), so our own
-        /// window is suppressed there.
+        /// Set when GetTextExt reports a degenerate rect AND a UI-element
+        /// sink claimed the list. A zero-height rect alone is not a bridge:
+        /// games such as 異環 return one and do not draw. A sink that sets
+        /// `pbShow` FALSE (FFXIV, the CUAS bridge) does draw, so ours stays hidden.
         bridge_detected: std::sync::Arc<AtomicBool>,
+        /// True after BeginUIElement returns with pbShow FALSE.
+        host_draws: AtomicBool,
 
         window_state: std::sync::Arc<Mutex<CandidateWindowState>>,
         window: Mutex<Option<CandidateWindow>>,
@@ -762,6 +765,7 @@ impl CandidateListPresenter {
                         page_size: page_size.max(1),
                         hide_window,
                         bridge_detected: std::sync::Arc::new(AtomicBool::new(false)),
+                        host_draws: AtomicBool::new(false),
                         window_state: std::sync::Arc::new(Mutex::new(CandidateWindowState::default())),
                         window: Mutex::new(None),
                         document_mgr: Mutex::new(None),
@@ -845,12 +849,11 @@ impl CandidateListPresenter {
         /// get it in their z-order band so it isn't covered.
         pub fn deferred_begin(this: &ComObject<CandidateListPresenter>) {
                 let presenter = this.get();
-                // Classify the host before the sink reads the list. A bridge
-                // that misses this first read keeps a 9-wide page (FFXIV).
-                presenter.note_bridge_from_text_ext();
                 if let Some(ui_mgr) = presenter.ui_element_mgr.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                         let element: ITfUIElement = this.to_interface();
-                        let mut show = BOOL(0);
+                        // Input TRUE: a sink that will draw sets it FALSE.
+                        // Passing FALSE makes "nobody claimed it" look like a claim.
+                        let mut show = BOOL(1);
                         let mut id = 0u32;
                         match unsafe { ui_mgr.BeginUIElement(&element, &mut show, &mut id) } {
                                 Ok(()) => {}
@@ -861,15 +864,19 @@ impl CandidateListPresenter {
                                 }
                         }
                         presenter.ui_element_id.store(id, Ordering::Relaxed);
-                        // pbShow=FALSE means a sink claimed the element. That
-                        // claim is not honored: Chromium never paints, and
-                        // Start / old UWP claim it and paint nothing either.
-                        // Keep the flag update so a sink that does read the
-                        // list still sees a dirty element, and always draw.
-                        if !show.as_bool() {
+                        let claimed = !show.as_bool();
+                        presenter.host_draws.store(claimed, Ordering::Relaxed);
+                        // pbShow=FALSE means a sink claimed the element.
+                        // Chromium and Start claim it and never paint; a real
+                        // line box (or a geometryless host) still draws ours.
+                        // A claim plus a zero-height extent is the bridge.
+                        if claimed {
                                 presenter.updated_flags.store(TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE, Ordering::Relaxed);
                         }
                 }
+                // After the claim is known, so a zero-height extent is only a
+                // bridge when the sink said it would draw (FFXIV).
+                presenter.note_bridge_from_text_ext();
                 presenter.is_show_mode.store(true, Ordering::Relaxed);
                 let owner = {
                         let context = presenter.context.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1108,14 +1115,13 @@ impl CandidateListPresenter {
                         Err(_) => return false,
                 };
                 let ec = self.edit_cookie.load(Ordering::Relaxed);
+                let host_draws = self.host_draws.load(Ordering::Relaxed);
                 if ec != u32::MAX {
-                        // Weasel's CUAS test: zero *height* means a
-                        // cicero-unaware host. Width may legitimately
-                        // be zero — a collapsed caret has left==right.
-                        // Start / old UWP also report zero height, but
-                        // they are TSF hosts with no line box; they
-                        // are excluded in resolve_text_ext.
-                        match anchor_rect(&view, ec, &range) {
+                        // Zero *height* is a bridge only when a sink claimed
+                        // the element. Width may legitimately be zero — a
+                        // collapsed caret has left==right. Start / old UWP
+                        // also report zero height and are excluded.
+                        match anchor_rect(&view, ec, &range, host_draws) {
                                 Ok(None) => {
                                         self.bridge_detected.store(true, Ordering::Relaxed);
                                         return true;
@@ -1138,6 +1144,7 @@ impl CandidateListPresenter {
                         return true;
                 }
                 let is_show = self.is_show_mode.load(Ordering::Relaxed);
+                let host_draws = self.host_draws.load(Ordering::Relaxed);
                 let bridge_detected = self.bridge_detected.clone();
                 let refresh_unk = self.self_unk.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let _ = crate::composition::request_edit_session(
@@ -1146,7 +1153,7 @@ impl CandidateListPresenter {
                         client_id,
                         TF_ES_ASYNCDONTCARE | TF_ES_READ,
                         Box::new(move |_state, ec, _ctx| {
-                                let Some(resolved) = anchor_rect(&view, ec, &range)? else {
+                                let Some(resolved) = anchor_rect(&view, ec, &range, host_draws)? else {
                                         bridge_detected.store(true, Ordering::Relaxed);
                                         // The first read may already have published
                                         // the full list. Ask the host to read again
@@ -1235,8 +1242,9 @@ impl CandidateListPresenter {
         }
 
         /// Zero-height text extent on a normal desktop process is a CUAS
-        /// bridge. Geometryless shell hosts also report zero height and are
-        /// not bridges.
+        /// bridge only when a sink claimed the element. Geometryless shell
+        /// hosts also report zero height and are not bridges. A game that
+        /// returns no line box and does not claim the UI still gets our window.
         fn note_bridge_from_text_ext(&self) {
                 let context = self.context.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let range = self.range.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1249,7 +1257,7 @@ impl CandidateListPresenter {
                 let mut rect = RECT::default();
                 let mut clipped = BOOL(0);
                 if unsafe { view.GetTextExt(ec, &range, &mut rect, &mut clipped) }.is_ok() {
-                        let bridge = rect.top == rect.bottom && !geometryless_host();
+                        let bridge = rect.top == rect.bottom && !geometryless_host() && self.host_draws.load(Ordering::Relaxed);
                         self.bridge_detected.store(bridge, Ordering::Relaxed);
                 }
         }

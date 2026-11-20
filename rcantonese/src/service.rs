@@ -530,7 +530,13 @@ impl ITfKeyEventSink_Impl for RCantoneseService_Impl {
                                         // Eaten — the handler may commit text
                                         // (tracked there); until then the
                                         // remembered doc char is stale.
-                                        crate::keys::clear_output_char();
+                                        // The period handler still needs that
+                                        // char: WeChat's text store does not
+                                        // read back the digit, and this clear
+                                        // runs before OnKeyDown.
+                                        if wparam.0 as u32 != crate::keytable::VK_OEM_PERIOD {
+                                                crate::keys::clear_output_char();
+                                        }
                                         Ok(BOOL(1))
                                 }
                                 None => {
