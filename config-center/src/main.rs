@@ -1010,11 +1010,21 @@ unsafe extern "system" fn delay_failure_hook(notify: u32, _info: *mut core::ffi:
 }
 
 fn install_downlevel_hook() {
+        use windows::Win32::System::Memory::{VirtualProtect, PAGE_PROTECTION_FLAGS, PAGE_READWRITE};
+        // delayimp.lib defines this hook as const data in .rdata. Assigning
+        // to it without changing the page protection is an access violation
+        // before the window exists.
         unsafe extern "C" {
                 static mut __pfnDliFailureHook2: usize;
         }
         unsafe {
-                __pfnDliFailureHook2 = delay_failure_hook as *const () as usize;
+                let ptr = std::ptr::addr_of_mut!(__pfnDliFailureHook2);
+                let mut old = PAGE_PROTECTION_FLAGS(0);
+                if VirtualProtect(ptr.cast(), std::mem::size_of::<usize>(), PAGE_READWRITE, &mut old).is_ok() {
+                        ptr.write(delay_failure_hook as *const () as usize);
+                        let mut ignored = PAGE_PROTECTION_FLAGS(0);
+                        let _ = VirtualProtect(ptr.cast(), std::mem::size_of::<usize>(), old, &mut ignored);
+                }
         }
 }
 
@@ -1083,12 +1093,10 @@ fn xml_escape(s: &str) -> String {
         s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-windows_link::link!("propsys.dll" "system" fn InitPropVariantFromString(psz: windows::core::PCWSTR, ppropvar: *mut windows::Win32::System::Com::StructuredStorage::PROPVARIANT) -> windows::core::HRESULT);
-
 fn ensure_toast_shortcut() -> windows::core::Result<()> {
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Foundation::{E_FAIL, PROPERTYKEY};
-        use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PropVariantClear};
+        use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
         use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile};
         use windows::core::Interface;
         use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
@@ -1124,9 +1132,7 @@ fn ensure_toast_shortcut() -> windows::core::Result<()> {
                         fmtid: windows::core::GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3),
                         pid: 5,
                 };
-                let mut prop = PROPVARIANT::default();
-                let aumid: Vec<u16> = TOAST_AUMID.encode_utf16().chain(std::iter::once(0)).collect();
-                InitPropVariantFromString(PCWSTR(aumid.as_ptr()), &mut prop).ok()?;
+                let mut prop = string_propvariant(TOAST_AUMID)?;
                 store.SetValue(&key, &prop)?;
                 store.Commit()?;
                 let _ = PropVariantClear(&mut prop);
@@ -1134,4 +1140,33 @@ fn ensure_toast_shortcut() -> windows::core::Result<()> {
                 file.Save(PCWSTR(lnk_wide.as_ptr()), true)?;
         }
         Ok(())
+}
+
+/// `VT_LPWSTR` allocated with `CoTaskMemAlloc`, which `PropVariantClear` frees.
+/// `InitPropVariantFromString` is not an export of propsys.dll on every
+/// supported Windows build, so a hard import dies before main.
+fn string_propvariant(text: &str) -> windows::core::Result<windows::Win32::System::Com::StructuredStorage::PROPVARIANT> {
+        use windows::Win32::Foundation::E_FAIL;
+        use windows::Win32::System::Com::CoTaskMemAlloc;
+        use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
+        use windows::Win32::System::Variant::VT_LPWSTR;
+        use windows::core::PWSTR;
+        let chars: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let mem = unsafe { CoTaskMemAlloc(chars.len() * 2) };
+        if mem.is_null() {
+                return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        unsafe {
+                std::ptr::copy_nonoverlapping(chars.as_ptr(), mem as *mut u16, chars.len());
+                let mut prop = PROPVARIANT::default();
+                let value = PROPVARIANT_0_0 {
+                        vt: VT_LPWSTR,
+                        wReserved1: 0,
+                        wReserved2: 0,
+                        wReserved3: 0,
+                        Anonymous: PROPVARIANT_0_0_0 { pwszVal: PWSTR(mem as *mut u16) },
+                };
+                std::ptr::write(std::ptr::addr_of_mut!(prop.Anonymous.Anonymous).cast(), value);
+                Ok(prop)
+        }
 }
