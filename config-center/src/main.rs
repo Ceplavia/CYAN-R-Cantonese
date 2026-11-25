@@ -168,6 +168,14 @@ fn install_locale(langid: u16) -> Result<(), String> {
                 for langid in [0x0c04u16, 0x0804u16, 0x0404u16] {
                         let _ = mgr.UnregisterProfile(&CLSID_RCANTONESE, langid, &GUID_PROFILE, 0);
                 }
+                // UnregisterProfile often leaves the lang key in place. Tray
+                // treats a leftover 0x0c04 key as "still zh-HK" and, on the
+                // next login, deletes the zh-CN tip Settings is listing.
+                for stale in [0x0c04u16, 0x0804u16, 0x0404u16] {
+                        if stale != langid {
+                                delete_profile_lang(stale);
+                        }
+                }
                 let icon = installed_dll_path().ok_or_else(|| "搵唔到已註冊嘅 DLL 路徑".to_string())?;
                 let desc: Vec<u16> = "R-Cantonese".encode_utf16().chain(std::iter::once(0)).collect();
                 mgr.RegisterProfile(
@@ -205,6 +213,19 @@ fn install_locale(langid: u16) -> Result<(), String> {
                         .map_err(|e| format!("0404 profile：{:?}", e.code()))?;
                 }
                 Ok(())
+        }
+}
+
+/// Remove `LanguageProfile\0x0000{langid}` after UnregisterProfile. The
+/// elevated installer is 64-bit, so this hits the native HKLM view.
+fn delete_profile_lang(langid: u16) {
+        use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RegDeleteTreeW};
+        let path = format!(
+                "SOFTWARE\\Microsoft\\CTF\\TIP\\{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}\\LanguageProfile\\{langid:#010x}\0"
+        );
+        let wide: Vec<u16> = path.encode_utf16().collect();
+        unsafe {
+                let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, windows::core::PCWSTR(wide.as_ptr()));
         }
 }
 

@@ -41,7 +41,13 @@ fn ensure_input_tip() {
                 // registered. Only the zh-HK install keeps the 0x0c04 profile —
                 // gate the zh-Hant-HK tips entry on it so switching to zh-CN /
                 // zh-TW doesn't leave a stray zh-HK entry we re-add each login.
-                let hk_active = profile_registered(0x0c04);
+                // zh-CN / zh-TW must be re-applied with InstallLayoutOrTip:
+                // Settings and the default-input list only show a tip that is
+                // attached to that language, and a previous login may have
+                // swept it while this process still thought zh-HK was active.
+                let cn_active = profile_enabled(0x0804);
+                let hk_active = !cn_active && profile_registered(0x0c04);
+                let tw_active = !cn_active && !hk_active && profile_registered(0x0404);
                 if hk_active {
                         ensure_hk_tip_entry();
                         // If zh-HK itself isn't in the user's language list the tip has
@@ -49,21 +55,25 @@ fn ensure_input_tip() {
                         // zh-HK "US" keyboard forces the language into the list; our tip
                         // then sits beside it. Cost: a spare "US" keyboard under zh-HK
                         // in Settings — only on machines that lacked the language.
-                        if !user_has_language() {
+                        if !user_has_language_tag(&["zh-hant-hk", "zh-hk"]) {
                                 let kb: Vec<u16> = "0C04:00000409".encode_utf16().chain(Some(0)).collect();
                                 if !InstallLayoutOrTip(PCWSTR(kb.as_ptr()), 0).as_bool() {
                                         log_error("InstallLayoutOrTip failed (zh-HK language)");
                                 }
                         }
+                } else if cn_active {
+                        ensure_lang_tip(0x0804, &["zh-hans-cn", "zh-cn"]);
+                } else if tw_active {
+                        ensure_lang_tip(0x0404, &["zh-hant-tw", "zh-tw"]);
                 }
                 // Drop our tips entries under languages that aren't the active
                 // locale — config-center sweeps at switch time, this keeps it
                 // consistent for machines that already accumulated them.
                 let keep = if hk_active {
                         Some("zh-hant-hk")
-                } else if profile_registered(0x0804) {
+                } else if cn_active {
                         Some("zh-hans-cn")
-                } else if profile_registered(0x0404) {
+                } else if tw_active {
                         Some("zh-hant-tw")
                 } else {
                         None
@@ -94,11 +104,12 @@ fn cleanup_residue(system: bool) {
                 // when invoked from a spawned process). ensure_input_tip
                 // covers it on the normal tray path.
                 use windows::Win32::System::Registry::*;
-                let keep = if profile_registered(0x0c04) {
+                let cn_active = profile_enabled(0x0804);
+                let keep = if cn_active {
+                        Some("zh-hans-cn")
+                } else if profile_registered(0x0c04) {
                         ensure_hk_tip_entry();
                         Some("zh-hant-hk")
-                } else if profile_registered(0x0804) {
-                        Some("zh-hans-cn")
                 } else if profile_registered(0x0404) {
                         Some("zh-hant-tw")
                 } else {
@@ -136,14 +147,16 @@ fn delete_user_dir_value() {
         }
 }
 
-/// Whether `HKLM\SOFTWARE\Microsoft\CTF\TIP\{clsid}\LanguageProfile\0x0000{langid}`
-/// exists — the config-center locale switch registers exactly the active locale's
-/// profile (zh-HK additionally keeps 0x0404 as the bridge dummy's host).
+/// Whether `...\LanguageProfile\0x0000{langid}\{profile}` exists.
+/// The parent lang key is not enough: UnregisterProfile often leaves it
+/// behind empty, and treating that as "still zh-HK" makes every login
+/// delete the zh-CN tip Settings actually lists.
+/// zh-HK additionally keeps 0x0404 as the bridge dummy's host.
 fn profile_registered(langid: u16) -> bool {
         use windows::Win32::System::Registry::*;
         unsafe {
                 let path = format!(
-                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}\\LanguageProfile\\{langid:#010x}\0"
+                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}\\LanguageProfile\\{langid:#010x}\\{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}\0"
                 );
                 let wide: Vec<u16> = path.encode_utf16().collect();
                 let mut key = HKEY::default();
@@ -158,6 +171,36 @@ fn profile_registered(langid: u16) -> bool {
                         let _ = RegCloseKey(key);
                 }
                 ok
+        }
+}
+
+/// `Enable == 1` on that langid's profile. A disabled 0x0c04 key left behind
+/// after switching to zh-CN must not win over the enabled zh-CN profile.
+fn profile_enabled(langid: u16) -> bool {
+        use windows::Win32::System::Registry::*;
+        unsafe {
+                let path = format!(
+                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}\\LanguageProfile\\{langid:#010x}\\{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}\0"
+                );
+                let wide: Vec<u16> = path.encode_utf16().collect();
+                let mut key = HKEY::default();
+                if RegOpenKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        KEY_READ | KEY_WOW64_64KEY,
+                        &mut key,
+                ) != ERROR_SUCCESS
+                {
+                        return false;
+                }
+                let name: Vec<u16> = "Enable".encode_utf16().chain(Some(0)).collect();
+                let mut data = [0u8; 4];
+                let mut size = 4u32;
+                let ok = RegQueryValueExW(key, PCWSTR(name.as_ptr()), None, None, Some(data.as_mut_ptr()), Some(&mut size))
+                        == ERROR_SUCCESS;
+                let _ = RegCloseKey(key);
+                ok && size == 4 && u32::from_le_bytes(data) == 1
         }
 }
 
@@ -725,9 +768,33 @@ fn ensure_hk_tip_entry() {
         }
 }
 
-/// Whether zh-Hant-HK is in the user's profile language list —
+/// Attach `{langid}:{clsid}{guid}` with InstallLayoutOrTip so Settings lists
+/// the IME under that language. Unlike zh-HK, these langids match the tip
+/// prefix, so ILOT is allowed. Also adds the language's US keyboard when the
+/// language itself is missing, or the tip has nothing to hang on.
+fn ensure_lang_tip(langid: u16, tags: &[&str]) {
+        unsafe {
+                if !user_has_language_tag(tags) {
+                        let kb: Vec<u16> = format!("{langid:04X}:00000409").encode_utf16().chain(Some(0)).collect();
+                        if !InstallLayoutOrTip(PCWSTR(kb.as_ptr()), 0).as_bool() {
+                                log_error(&format!("InstallLayoutOrTip failed (language {langid:#06x})"));
+                        }
+                }
+                let tip: Vec<u16> = format!(
+                        "{langid:04X}:{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}"
+                )
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+                if !InstallLayoutOrTip(PCWSTR(tip.as_ptr()), 0).as_bool() {
+                        log_error(&format!("InstallLayoutOrTip failed (tip {langid:#06x})"));
+                }
+        }
+}
+
+/// Whether any of `tags` is in the user's profile language list —
 /// HKCU\Control Panel\International\User Profile\Languages (REG_MULTI_SZ).
-fn user_has_language() -> bool {
+fn user_has_language_tag(tags: &[&str]) -> bool {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_MULTI_SZ, RegGetValueW};
         unsafe {
                 let key_path: Vec<u16> = "Control Panel\\International\\User Profile"
@@ -766,7 +833,7 @@ fn user_has_language() -> bool {
                 }
                 buf.split(|&c| c == 0)
                         .map(|s| String::from_utf16_lossy(s).to_lowercase())
-                        .any(|s| s == "zh-hant-hk" || s == "zh-hk")
+                        .any(|s| tags.iter().any(|tag| s == *tag))
         }
 }
 
