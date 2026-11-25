@@ -69,15 +69,7 @@ fn ensure_input_tip() {
                 // Drop our tips entries under languages that aren't the active
                 // locale — config-center sweeps at switch time, this keeps it
                 // consistent for machines that already accumulated them.
-                let keep = if hk_active {
-                        Some("zh-hant-hk")
-                } else if cn_active {
-                        Some("zh-hans-cn")
-                } else if tw_active {
-                        Some("zh-hant-tw")
-                } else {
-                        None
-                };
+                let keep = installed_locale_tags(hk_active, cn_active, tw_active);
                 if let Some(keep) = keep {
                         sweep_tips_in(HKEY_CURRENT_USER, "Control Panel\\International\\User Profile", Some(keep));
                 }
@@ -105,16 +97,12 @@ fn cleanup_residue(system: bool) {
                 // covers it on the normal tray path.
                 use windows::Win32::System::Registry::*;
                 let cn_active = profile_enabled(0x0804);
-                let keep = if cn_active {
-                        Some("zh-hans-cn")
-                } else if profile_registered(0x0c04) {
+                let hk_active = !cn_active && profile_registered(0x0c04);
+                let tw_active = !cn_active && !hk_active && profile_registered(0x0404);
+                if hk_active {
                         ensure_hk_tip_entry();
-                        Some("zh-hant-hk")
-                } else if profile_registered(0x0404) {
-                        Some("zh-hant-tw")
-                } else {
-                        None
-                };
+                }
+                let keep = installed_locale_tags(hk_active, cn_active, tw_active);
                 if let Some(keep) = keep {
                         sweep_tips_in(HKEY_CURRENT_USER, "Control Panel\\International\\User Profile", Some(keep));
                 }
@@ -204,11 +192,27 @@ fn profile_enabled(langid: u16) -> bool {
         }
 }
 
+/// Tags for the locale the user actually installed. Login must keep every
+/// alias of that language (`zh-CN` as well as `zh-Hans-CN`) and drop the tip
+/// from the others. Simplified wins when its profile is enabled; otherwise a
+/// present zh-HK profile means the Hong Kong install, including the case
+/// where that profile is disabled and only the 0404 bridge profile is enabled.
+fn installed_locale_tags(hk_active: bool, cn_active: bool, tw_active: bool) -> Option<&'static [&'static str]> {
+        if cn_active {
+                Some(&["zh-hans-cn", "zh-cn"])
+        } else if hk_active {
+                Some(&["zh-hant-hk", "zh-hk"])
+        } else if tw_active {
+                Some(&["zh-hant-tw", "zh-tw"])
+        } else {
+                None
+        }
+}
+
 /// Delete `*:{clsid}{guid}` DWORDs from every `<root>\<lang>` key except the
-/// `keep` language — entries under other languages surface as extra
-/// R-Cantonese rows in the language picker. `keep: None` sweeps all of them
-/// (used for the .DEFAULT hive where nothing of ours is legitimate).
-fn sweep_tips_in(hive: HKEY, root: &str, keep: Option<&str>) {
+/// installed language's tags. `keep: None` sweeps all of them (the .DEFAULT
+/// hive, where nothing of ours is legitimate).
+fn sweep_tips_in(hive: HKEY, root: &str, keep: Option<&[&str]>) {
         use windows::Win32::System::Registry::*;
         use windows::core::PWSTR;
         const SUFFIX: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
@@ -235,7 +239,7 @@ fn sweep_tips_in(hive: HKEY, root: &str, keep: Option<&str>) {
                 }
                 let _ = RegCloseKey(root_key);
                 for lang in langs {
-                        if keep.is_some_and(|k| lang.eq_ignore_ascii_case(k)) {
+                        if keep.is_some_and(|tags| tags.iter().any(|k| lang.eq_ignore_ascii_case(k))) {
                                 continue;
                         }
                         let path = format!("{root}\\{lang}\0");

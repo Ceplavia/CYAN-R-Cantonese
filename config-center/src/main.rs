@@ -829,10 +829,10 @@ fn install_tip_for_user(langid: u16) -> Result<(), String> {
 fn sweep_tip_entries_except(langid: u16) {
         use windows::Win32::System::Registry::*;
         use windows::core::PWSTR;
-        let keep = match langid {
-                0x0c04 => "zh-hant-hk",
-                0x0804 => "zh-hans-cn",
-                0x0404 => "zh-hant-tw",
+        let keep: &[&str] = match langid {
+                0x0c04 => &["zh-hant-hk", "zh-hk"],
+                0x0804 => &["zh-hans-cn", "zh-cn"],
+                0x0404 => &["zh-hant-tw", "zh-tw"],
                 _ => return,
         };
         const TIP_SUFFIX: &str = "{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
@@ -860,7 +860,7 @@ fn sweep_tip_entries_except(langid: u16) {
                 }
                 let _ = RegCloseKey(root);
                 for lang in langs {
-                        if lang.eq_ignore_ascii_case(keep) {
+                        if keep.iter().any(|k| lang.eq_ignore_ascii_case(k)) {
                                 continue;
                         }
                         let path = format!("Control Panel\\International\\User Profile\\{lang}\0");
