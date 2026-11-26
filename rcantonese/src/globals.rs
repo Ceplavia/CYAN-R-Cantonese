@@ -7,12 +7,9 @@ use windows::Win32::Foundation::{HINSTANCE, MAX_PATH};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 
 pub const TEXTSERVICE_MODEL: &str = "Apartment";
-// MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_HONGKONG)
+// MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_HONGKONG). The profile langid
+// matches the language, the same way Weasel registers hongkong as 0x0c04.
 pub const TEXTSERVICE_LANGID: u16 = 0x0c04;
-/// zh-TW (Traditional) — Weasel-style: HK users' tips entry uses the 0404
-/// langid so cicero-unaware apps get the 0x04040404 dummy, which hosts our
-/// TIP in-process through the CTF bridge (native .ime is gone).
-pub const TEXTSERVICE_BRIDGE_LANGID: u16 = 0x0404;
 pub const TEXTSERVICE_ICON_INDEX: u32 = 12; // -IDIS_IME
 pub const TEXTSERVICE_SQLITE_DATA: &str = "ime.sqlite3";
 

@@ -191,33 +191,48 @@ fn install_locale(langid: u16) -> Result<(), String> {
                         0,
                 )
                 .map_err(|e| format!("{:?}", e.code()))?;
-                // ActivateProfile is for keyboard-layout profiles — calling it
-                // on a TIP fails E_INVALIDARG while the tips entry alone already
-                // surfaces the IME. Skip it entirely.
-                // zh-HK keeps the 0404 bridge profile beside its own —
-                // DllRegisterServer registers both; switching locale must not
-                // drop the bridge or cicero-unaware apps lose the IME.
-                if langid == 0x0c04 {
-                        mgr.RegisterProfile(
-                                &CLSID_RCANTONESE,
-                                0x0404,
-                                &GUID_PROFILE,
-                                &desc[..desc.len() - 1],
-                                &icon,
-                                0,
-                                windows::Win32::UI::Input::KeyboardAndMouse::HKL::default(),
-                                0,
-                                true,
-                                0,
-                        )
-                        .map_err(|e| format!("0404 profile：{:?}", e.code()))?;
-                }
+                write_profile_enable(langid, true);
+                write_installed_langid(langid);
                 Ok(())
         }
 }
 
 /// Remove `LanguageProfile\0x0000{langid}` after UnregisterProfile. The
 /// elevated installer is 64-bit, so this hits the native HKLM view.
+/// RegisterProfile does not update Enable when the profile already exists.
+fn write_profile_enable(langid: u16, enabled: bool) {
+        use windows::Win32::System::Registry::{
+                HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW,
+                RegSetValueExW,
+        };
+        let path = format!(
+                "SOFTWARE\\Microsoft\\CTF\\TIP\\{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}\\LanguageProfile\\{langid:#010x}\\{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}\0"
+        );
+        let wide: Vec<u16> = path.encode_utf16().collect();
+        unsafe {
+                let mut key = windows::Win32::System::Registry::HKEY::default();
+                if RegCreateKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        windows::core::PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        windows::core::PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_WRITE | KEY_WOW64_64KEY,
+                        None,
+                        &mut key,
+                        None,
+                )
+                .is_err()
+                {
+                        return;
+                }
+                let name: Vec<u16> = "Enable\0".encode_utf16().collect();
+                let v = u32::from(enabled);
+                let _ = RegSetValueExW(key, windows::core::PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&v.to_le_bytes()));
+                let _ = RegCloseKey(key);
+        }
+}
+
 fn delete_profile_lang(langid: u16) {
         use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RegDeleteTreeW};
         let path = format!(
@@ -226,6 +241,37 @@ fn delete_profile_lang(langid: u16) {
         let wide: Vec<u16> = path.encode_utf16().collect();
         unsafe {
                 let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, windows::core::PCWSTR(wide.as_ptr()));
+        }
+}
+
+fn write_installed_langid(langid: u16) {
+        use windows::Win32::System::Registry::{
+                HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, RegCloseKey,
+                RegCreateKeyExW, RegSetValueExW,
+        };
+        let path = "SOFTWARE\\Microsoft\\CTF\\TIP\\{D2291A80-84D8-4641-9AB2-BDD1472C846B}\0";
+        let wide: Vec<u16> = path.encode_utf16().collect();
+        unsafe {
+                let mut key = windows::Win32::System::Registry::HKEY::default();
+                if RegCreateKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        windows::core::PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        windows::core::PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_READ | KEY_WRITE | KEY_WOW64_64KEY,
+                        None,
+                        &mut key,
+                        None,
+                )
+                .is_err()
+                {
+                        return;
+                }
+                let name: Vec<u16> = "InstalledLangId".encode_utf16().chain(std::iter::once(0)).collect();
+                let v = langid as u32;
+                let _ = RegSetValueExW(key, windows::core::PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&v.to_le_bytes()));
+                let _ = RegCloseKey(key);
         }
 }
 
@@ -794,33 +840,52 @@ windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flag
 /// language into the user's language list when it's missing, otherwise the
 /// tip has nothing to attach to and never appears in the picker.
 fn install_tip_for_user(langid: u16) -> Result<(), String> {
-        // zh-HK uses the 0404 tips entry (bridge dummy 0x04040404 hosts the
-        // TIP in cicero-unaware apps). ILOT can't write a tip under a
-        // different language, so that entry goes straight into zh-Hant-HK's
-        // User Profile key — same write the tray does at login.
-        if langid == 0x0c04 {
-                ensure_hk_tip_entry()?;
-        } else {
-                let tip = format!("{langid:04X}:{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}");
-                let wide: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
-                unsafe {
-                        if !InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0).as_bool() {
-                                return Err("InstallLayoutOrTip failed".into());
-                        }
-                }
-        }
         unsafe {
                 // If the language itself isn't in the user's language list yet,
-                // install its stock keyboard to force it in — our tip then
-                // attaches under it (only on machines lacking the language).
+                // install its stock keyboard first — the tip has nothing to
+                // attach to otherwise.
                 if !user_has_language(langid) {
                         let kb = format!("{langid:04X}:00000409");
                         let wide: Vec<u16> = kb.encode_utf16().chain(std::iter::once(0)).collect();
                         let _ = InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0);
                 }
         }
+        let tip = format!("{langid:04X}:{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}");
+        let wide: Vec<u16> = tip.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+                if !InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0).as_bool() {
+                        return Err("InstallLayoutOrTip failed".into());
+                }
+        }
+        if langid == 0x0c04 {
+                drop_stale_hk_tip();
+        }
         sweep_tip_entries_except(langid);
+        // WeaselSetup::enable_profile runs after regsvr32, in the user process.
+        enable_language_profile(langid)?;
         Ok(())
+}
+
+/// WeaselSetup::enable_profile. Enables the profile for this user and marks
+/// it enabled-by-default. Does not activate the session or rewrite list order.
+fn enable_language_profile(langid: u16) -> Result<(), String> {
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::TextServices::{ITfInputProcessorProfiles, CLSID_TF_InputProcessorProfiles};
+        unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                let profiles: ITfInputProcessorProfiles = CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|e| format!("EnableLanguageProfile: {:?}", e.code()))?;
+                profiles
+                        .EnableLanguageProfile(&CLSID_RCANTONESE, langid, &GUID_PROFILE, true)
+                        .map_err(|e| format!("EnableLanguageProfile: {:?}", e.code()))?;
+                profiles
+                        .EnableLanguageProfileByDefault(&CLSID_RCANTONESE, langid, &GUID_PROFILE, true)
+                        .map_err(|e| format!("EnableLanguageProfileByDefault: {:?}", e.code()))?;
+                if langid == 0x0c04 {
+                        let _ = profiles.EnableLanguageProfile(&CLSID_RCANTONESE, 0x0404, &GUID_PROFILE, false);
+                }
+                Ok(())
+        }
 }
 
 /// Remove our tips entries (`{langid}:{clsid}{guid}` DWORDs) from every
@@ -896,71 +961,22 @@ fn sweep_tip_entries_except(langid: u16) {
         }
 }
 
-/// Mirror of the tray's ensure_hk_tip_entry — write `0404:{clsid}{guid}`
-/// into zh-Hant-HK's input-method list and drop the stale `0C04:` entry.
-fn ensure_hk_tip_entry() -> Result<(), String> {
-        use windows::Win32::System::Registry::*;
-        use windows::core::PWSTR;
-        const TIP_0404: &str = "0404:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
-        const TIP_0C04: &str = "0C04:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+/// Remove the old `0404:{clsid}{guid}` value left under the Hong Kong language.
+fn drop_stale_hk_tip() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_SET_VALUE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW};
+        const STALE: &str = "0404:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
         unsafe {
-                let key_path: Vec<u16> = "Control Panel\\International\\User Profile\\zh-Hant-HK"
-                        .encode_utf16()
-                        .chain(std::iter::once(0))
-                        .collect();
-                let mut key = HKEY::default();
-                if RegCreateKeyW(HKEY_CURRENT_USER, windows::core::PCWSTR(key_path.as_ptr()), &mut key) != ERROR_SUCCESS {
-                        return Err("開 zh-Hant-HK profile key 失敗".into());
-                }
-                let stale: Vec<u16> = TIP_0C04.encode_utf16().chain(std::iter::once(0)).collect();
-                let _ = RegDeleteValueW(key, windows::core::PCWSTR(stale.as_ptr()));
-                let name: Vec<u16> = TIP_0404.encode_utf16().chain(std::iter::once(0)).collect();
-                let mut exists = [0u8; 4];
-                let mut size = 4u32;
-                if RegQueryValueExW(
-                        key,
-                        windows::core::PCWSTR(name.as_ptr()),
-                        None,
-                        None,
-                        Some(exists.as_mut_ptr()),
-                        Some(&mut size),
-                ) == ERROR_SUCCESS
-                {
+                let name: Vec<u16> = STALE.encode_utf16().chain(std::iter::once(0)).collect();
+                for tag in ["zh-Hant-HK", "zh-HK"] {
+                        let path = format!("Control Panel\\International\\User Profile\\{tag}\0");
+                        let wide: Vec<u16> = path.encode_utf16().collect();
+                        let mut key = windows::Win32::System::Registry::HKEY::default();
+                        if RegOpenKeyExW(HKEY_CURRENT_USER, windows::core::PCWSTR(wide.as_ptr()), Some(0), KEY_SET_VALUE, &mut key).is_err() {
+                                continue;
+                        }
+                        let _ = RegDeleteValueW(key, windows::core::PCWSTR(name.as_ptr()));
                         let _ = RegCloseKey(key);
-                        return Ok(());
                 }
-                // Next ordering index = max existing DWORD value + 1.
-                let mut index = 1u32;
-                let mut i = 0u32;
-                loop {
-                        let mut nbuf = [0u16; 128];
-                        let mut nlen = nbuf.len() as u32;
-                        let mut data = [0u8; 4];
-                        let mut dlen = 4u32;
-                        if RegEnumValueW(
-                                key,
-                                i,
-                                Some(PWSTR(nbuf.as_mut_ptr())),
-                                &mut nlen,
-                                None,
-                                None,
-                                Some(data.as_mut_ptr()),
-                                Some(&mut dlen),
-                        ) != ERROR_SUCCESS
-                        {
-                                break;
-                        }
-                        i += 1;
-                        if dlen == 4 {
-                                index = index.max(u32::from_le_bytes(data) + 1);
-                        }
-                }
-                let ok = RegSetValueExW(key, windows::core::PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&index.to_le_bytes()));
-                let _ = RegCloseKey(key);
-                if ok != ERROR_SUCCESS {
-                        return Err("寫 0404 tips entry 失敗".into());
-                }
-                Ok(())
         }
 }
 

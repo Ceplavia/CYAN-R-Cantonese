@@ -1,4 +1,4 @@
-﻿// r-cantonese-tray.exe — user-session helper, WeaselServer-style.
+// r-cantonese-tray.exe — user-session helper, WeaselServer-style.
 //
 // It does not own a notification-area icon. The 中/A button beside the
 // input indicator is the langbar item. This process serves settings.toml
@@ -22,12 +22,9 @@ const WM_TRAY_PING: u32 = WM_APP + 48; // liveness probe — returns TRAY_MAGIC
 const TRAY_MAGIC: isize = 0x5243; // 'RC'
 
 const TRAY_WND_CLASS: PCWSTR = w!("RCantoneseTrayIconWnd");
-/// Our input tip — `{langid}:{clsid}{profile_guid}` for InstallLayoutOrTip.
-/// The user-visible entry is the 0404 (zh-TW-langid) profile — Weasel's
-/// approach for HK users: cicero-unaware apps then get the 0x04040404
-/// dummy which hosts our TIP through the CTF bridge.
-const INPUT_TIP: &str = "0404:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
-const INPUT_TIP_0C04: &str = "0C04:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
+/// Previous Hong Kong installs wrote this under zh-Hant-HK. The profile
+/// langid is 0x0c04 now, so the 0404 entry is a second row and gets removed.
+const STALE_HK_TIP: &str = "0404:{D2291A80-84D8-4641-9AB2-BDD1472C846B}{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}";
 
 // windows-link raw-dylib import — no import lib / GetProcAddress needed.
 windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flags: u32) -> BOOL);
@@ -36,8 +33,7 @@ windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flag
 /// a non-elevated context (from regsvr32/admin it lands on .DEFAULT), and
 /// the tray runs as the logged-in user at every login anyway.
 fn ensure_input_tip() {
-        unsafe {
-                // The config center's locale switch decides which profile is
+        // The config center's locale switch decides which profile is
                 // registered. Only the zh-HK install keeps the 0x0c04 profile —
                 // gate the zh-Hant-HK tips entry on it so switching to zh-CN /
                 // zh-TW doesn't leave a stray zh-HK entry we re-add each login.
@@ -45,27 +41,17 @@ fn ensure_input_tip() {
                 // Settings and the default-input list only show a tip that is
                 // attached to that language, and a previous login may have
                 // swept it while this process still thought zh-HK was active.
-                let cn_active = profile_enabled(0x0804);
-                let hk_active = !cn_active && profile_registered(0x0c04);
-                let tw_active = !cn_active && !hk_active && profile_registered(0x0404);
-                if hk_active {
-                        ensure_hk_tip_entry();
-                        // If zh-HK itself isn't in the user's language list the tip has
-                        // nowhere to attach (seen on zh-CN-only systems). Installing the
-                        // zh-HK "US" keyboard forces the language into the list; our tip
-                        // then sits beside it. Cost: a spare "US" keyboard under zh-HK
-                        // in Settings — only on machines that lacked the language.
-                        if !user_has_language_tag(&["zh-hant-hk", "zh-hk"]) {
-                                let kb: Vec<u16> = "0C04:00000409".encode_utf16().chain(Some(0)).collect();
-                                if !InstallLayoutOrTip(PCWSTR(kb.as_ptr()), 0).as_bool() {
-                                        log_error("InstallLayoutOrTip failed (zh-HK language)");
-                                }
-                        }
+                let (hk_active, cn_active, tw_active) = active_locale_flags();
+                let fresh_tip = if hk_active {
+                        drop_stale_hk_tip();
+                        ensure_lang_tip(0x0c04, &["zh-hant-hk", "zh-hk"])
                 } else if cn_active {
-                        ensure_lang_tip(0x0804, &["zh-hans-cn", "zh-cn"]);
+                        ensure_lang_tip(0x0804, &["zh-hans-cn", "zh-cn"])
                 } else if tw_active {
-                        ensure_lang_tip(0x0404, &["zh-hant-tw", "zh-tw"]);
-                }
+                        ensure_lang_tip(0x0404, &["zh-hant-tw", "zh-tw"])
+                } else {
+                        false
+                };
                 // Drop our tips entries under languages that aren't the active
                 // locale — config-center sweeps at switch time, this keeps it
                 // consistent for machines that already accumulated them.
@@ -76,6 +62,19 @@ fn ensure_input_tip() {
                 clean_dead_preloads(HKEY_CURRENT_USER, "Keyboard Layout\\Preload");
                 clean_assembly_item_dups(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\SortOrder\\AssemblyItem");
                 clean_dead_assemblies(HKEY_CURRENT_USER, "Software\\Microsoft\\CTF\\Assemblies");
+                // WeaselSetup::enable_profile — enable the installed profile
+                // for this user. ByDefault only when the tip was just added,
+                // which is their install path. A later login must not rewrite
+                // the default the user picked in Settings.
+                let profile_lang = if hk_active {
+                        0x0c04
+                } else if cn_active {
+                        0x0804
+                } else {
+                        0x0404
+                };
+        if hk_active || cn_active || tw_active {
+                enable_language_profile(profile_lang, fresh_tip);
         }
 }
 
@@ -95,12 +94,9 @@ fn cleanup_residue(system: bool) {
                 // language force-add (it can spawn a hidden system dialog
                 // when invoked from a spawned process). ensure_input_tip
                 // covers it on the normal tray path.
-                use windows::Win32::System::Registry::*;
-                let cn_active = profile_enabled(0x0804);
-                let hk_active = !cn_active && profile_registered(0x0c04);
-                let tw_active = !cn_active && !hk_active && profile_registered(0x0404);
+                let (hk_active, cn_active, tw_active) = active_locale_flags();
                 if hk_active {
-                        ensure_hk_tip_entry();
+                        drop_stale_hk_tip();
                 }
                 let keep = installed_locale_tags(hk_active, cn_active, tw_active);
                 if let Some(keep) = keep {
@@ -139,7 +135,6 @@ fn delete_user_dir_value() {
 /// The parent lang key is not enough: UnregisterProfile often leaves it
 /// behind empty, and treating that as "still zh-HK" makes every login
 /// delete the zh-CN tip Settings actually lists.
-/// zh-HK additionally keeps 0x0404 as the bridge dummy's host.
 fn profile_registered(langid: u16) -> bool {
         use windows::Win32::System::Registry::*;
         unsafe {
@@ -192,11 +187,93 @@ fn profile_enabled(langid: u16) -> bool {
         }
 }
 
+/// zh-CN when that profile is the one config-center installed. Otherwise
+/// zh-HK if its profile exists (Enable is intentionally 0 there). The
+/// explicit InstalledLangId wins, so an upgrade that also registers the
+/// bridge profile cannot flip a simplified install back to Hong Kong.
+fn installed_langid() -> u16 {
+        use windows::Win32::System::Registry::*;
+        unsafe {
+                let path = "SOFTWARE\\Microsoft\\CTF\\TIP\\{D2291A80-84D8-4641-9AB2-BDD1472C846B}\0";
+                let wide: Vec<u16> = path.encode_utf16().collect();
+                let mut key = HKEY::default();
+                if RegOpenKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        KEY_READ | KEY_WOW64_64KEY,
+                        &mut key,
+                ) == ERROR_SUCCESS
+                {
+                        let name: Vec<u16> = "InstalledLangId".encode_utf16().chain(Some(0)).collect();
+                        let mut data = [0u8; 4];
+                        let mut size = 4u32;
+                        let ok = RegQueryValueExW(key, PCWSTR(name.as_ptr()), None, None, Some(data.as_mut_ptr()), Some(&mut size))
+                                == ERROR_SUCCESS;
+                        let _ = RegCloseKey(key);
+                        if ok && size == 4 {
+                                let id = u32::from_le_bytes(data) as u16;
+                                if matches!(id, 0x0804 | 0x0c04 | 0x0404) {
+                                        return id;
+                                }
+                        }
+                }
+        }
+        if profile_enabled(0x0804) {
+                0x0804
+        } else if profile_registered(0x0c04) {
+                0x0c04
+        } else if profile_registered(0x0404) {
+                0x0404
+        } else {
+                0x0c04
+        }
+}
+
+fn active_locale_flags() -> (bool, bool, bool) {
+        let lang = installed_langid();
+        (lang == 0x0c04, lang == 0x0804, lang == 0x0404)
+}
+
+/// WeaselSetup::enable_profile. Enables the profile for this user.
+/// `by_default` is their EnableLanguageProfileByDefault, used when the tip
+/// is first installed. It is not ActivateProfile and does not touch list order
+/// or InputMethodOverride.
+fn enable_language_profile(langid: u16, by_default: bool) {
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::TextServices::{ITfInputProcessorProfiles, CLSID_TF_InputProcessorProfiles};
+        use windows::core::GUID;
+        const CLSID_RC: GUID = GUID::from_u128(0xD2291A80_84D8_4641_9AB2_BDD1472C846B);
+        const PROFILE: GUID = GUID::from_u128(0x83955C0E_2C09_47A5_BCF3_F2B98E11EE8B);
+        unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                let Ok(profiles) = CoCreateInstance::<_, ITfInputProcessorProfiles>(
+                        &CLSID_TF_InputProcessorProfiles,
+                        None,
+                        CLSCTX_INPROC_SERVER,
+                ) else {
+                        return;
+                };
+                if let Err(e) = profiles.EnableLanguageProfile(&CLSID_RC, langid, &PROFILE, true) {
+                        log_error(&format!("EnableLanguageProfile {langid:#06x} failed: {e:?}"));
+                }
+                if by_default {
+                        if let Err(e) = profiles.EnableLanguageProfileByDefault(&CLSID_RC, langid, &PROFILE, true) {
+                                log_error(&format!("EnableLanguageProfileByDefault {langid:#06x} failed: {e:?}"));
+                        }
+                }
+                // Old Hong Kong installs also enabled 0x0404. Turn that copy off
+                // so the language list keeps a single R-Cantonese row.
+                if langid == 0x0c04 {
+                        let _ = profiles.EnableLanguageProfile(&CLSID_RC, 0x0404, &PROFILE, false);
+                }
+        }
+}
+
 /// Tags for the locale the user actually installed. Login must keep every
 /// alias of that language (`zh-CN` as well as `zh-Hans-CN`) and drop the tip
 /// from the others. Simplified wins when its profile is enabled; otherwise a
-/// present zh-HK profile means the Hong Kong install, including the case
-/// where that profile is disabled and only the 0404 bridge profile is enabled.
+/// present zh-HK profile means the Hong Kong install.
 fn installed_locale_tags(hk_active: bool, cn_active: bool, tw_active: bool) -> Option<&'static [&'static str]> {
         if cn_active {
                 Some(&["zh-hans-cn", "zh-cn"])
@@ -703,80 +780,33 @@ fn clean_dead_assemblies(hive: HKEY, root: &str) {
         }
 }
 
-/// Write `0404:{clsid}{guid}` into zh-Hant-HK's input-method list —
-/// HKCU\Control Panel\International\User Profile\zh-Hant-HK holds DWORD
-/// ordering values named by tip string. Idempotent.
-fn ensure_hk_tip_entry() {
+/// Remove the old `0404:{clsid}{guid}` value under the Hong Kong language.
+/// The current tip is `0C04:`.
+fn drop_stale_hk_tip() {
         use windows::Win32::System::Registry::*;
         unsafe {
-                let key_path: Vec<u16> = "Control Panel\\International\\User Profile\\zh-Hant-HK"
-                        .encode_utf16()
-                        .chain(Some(0))
-                        .collect();
-                let mut key = HKEY::default();
-                if RegCreateKeyW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()), &mut key) != ERROR_SUCCESS {
-                        log_error("ensure_hk_tip_entry: key open failed");
-                        return;
-                }
-                // Drop the stale 0C04 entry left by <=0.9.2 installs — the
-                // flyout would otherwise show two R-Cantonese entries under
-                // zh-HK, and the 0c04 path has no bridge dummy behind it.
-                let stale: Vec<u16> = INPUT_TIP_0C04.encode_utf16().chain(Some(0)).collect();
-                let _ = RegDeleteValueW(key, PCWSTR(stale.as_ptr()));
-                let name: Vec<u16> = INPUT_TIP.encode_utf16().chain(Some(0)).collect();
-                let mut exists = [0u8; 4];
-                let mut size = 4u32;
-                if RegQueryValueExW(
-                        key,
-                        PCWSTR(name.as_ptr()),
-                        None,
-                        None,
-                        Some(exists.as_mut_ptr()),
-                        Some(&mut size),
-                ) == ERROR_SUCCESS
-                {
+                let name: Vec<u16> = STALE_HK_TIP.encode_utf16().chain(Some(0)).collect();
+                for tag in ["zh-Hant-HK", "zh-HK"] {
+                        let path = format!("Control Panel\\International\\User Profile\\{tag}\0");
+                        let wide: Vec<u16> = path.encode_utf16().collect();
+                        let mut key = HKEY::default();
+                        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr()), Some(0), KEY_SET_VALUE, &mut key) != ERROR_SUCCESS {
+                                continue;
+                        }
+                        let _ = RegDeleteValueW(key, PCWSTR(name.as_ptr()));
                         let _ = RegCloseKey(key);
-                        return;
-                }
-                // Next ordering index = max existing DWORD value + 1.
-                let mut index = 1u32;
-                let mut i = 0u32;
-                loop {
-                        let mut nbuf = [0u16; 128];
-                        let mut nlen = nbuf.len() as u32;
-                        let mut data = [0u8; 4];
-                        let mut dlen = 4u32;
-                        if RegEnumValueW(
-                                key,
-                                i,
-                                Some(PWSTR(nbuf.as_mut_ptr())),
-                                &mut nlen,
-                                None,
-                                None,
-                                Some(data.as_mut_ptr()),
-                                Some(&mut dlen),
-                        ) != ERROR_SUCCESS
-                        {
-                                break;
-                        }
-                        i += 1;
-                        if dlen == 4 {
-                                index = index.max(u32::from_le_bytes(data) + 1);
-                        }
-                }
-                let ok = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&index.to_le_bytes()));
-                let _ = RegCloseKey(key);
-                if ok != ERROR_SUCCESS {
-                        log_error("ensure_hk_tip_entry: write failed");
                 }
         }
 }
 
 /// Attach `{langid}:{clsid}{guid}` with InstallLayoutOrTip so Settings lists
-/// the IME under that language. Unlike zh-HK, these langids match the tip
-/// prefix, so ILOT is allowed. Also adds the language's US keyboard when the
-/// language itself is missing, or the tip has nothing to hang on.
-fn ensure_lang_tip(langid: u16, tags: &[&str]) {
+/// the IME under that language. The langid matches the language, so ILOT is
+/// allowed. Also adds the language's US keyboard when the
+/// language itself is missing. Skips ILOT once the tip is already listed —
+/// repeating it rewrites the user's input-method configuration. Returns
+/// whether this call added the tip. Flags stay 0, same as Weasel's old
+/// InstallLayoutOrTip call: that does not set ILOT_DEFPROFILE.
+fn ensure_lang_tip(langid: u16, tags: &[&str]) -> bool {
         unsafe {
                 if !user_has_language_tag(tags) {
                         let kb: Vec<u16> = format!("{langid:04X}:00000409").encode_utf16().chain(Some(0)).collect();
@@ -784,15 +814,40 @@ fn ensure_lang_tip(langid: u16, tags: &[&str]) {
                                 log_error(&format!("InstallLayoutOrTip failed (language {langid:#06x})"));
                         }
                 }
-                let tip: Vec<u16> = format!(
+                let tip = format!(
                         "{langid:04X}:{{D2291A80-84D8-4641-9AB2-BDD1472C846B}}{{83955C0E-2C09-47A5-BCF3-F2B98E11EE8B}}"
-                )
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
-                if !InstallLayoutOrTip(PCWSTR(tip.as_ptr()), 0).as_bool() {
-                        log_error(&format!("InstallLayoutOrTip failed (tip {langid:#06x})"));
+                );
+                if user_has_tip(tags, &tip) {
+                        return false;
                 }
+                let wide: Vec<u16> = tip.encode_utf16().chain(Some(0)).collect();
+                if !InstallLayoutOrTip(PCWSTR(wide.as_ptr()), 0).as_bool() {
+                        log_error(&format!("InstallLayoutOrTip failed (tip {langid:#06x})"));
+                        return false;
+                }
+                true
+        }
+}
+
+fn user_has_tip(tags: &[&str], tip: &str) -> bool {
+        use windows::Win32::System::Registry::*;
+        unsafe {
+                let name: Vec<u16> = tip.encode_utf16().chain(Some(0)).collect();
+                for tag in tags {
+                        let path = format!("Control Panel\\International\\User Profile\\{tag}\0");
+                        let wide: Vec<u16> = path.encode_utf16().collect();
+                        let mut key = HKEY::default();
+                        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr()), Some(0), KEY_READ, &mut key) != ERROR_SUCCESS {
+                                continue;
+                        }
+                        let mut size = 0u32;
+                        let found = RegQueryValueExW(key, PCWSTR(name.as_ptr()), None, None, None, Some(&mut size)) == ERROR_SUCCESS;
+                        let _ = RegCloseKey(key);
+                        if found {
+                                return true;
+                        }
+                }
+                false
         }
 }
 

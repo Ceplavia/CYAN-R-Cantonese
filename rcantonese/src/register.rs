@@ -132,26 +132,36 @@ pub fn register_profiles() -> bool {
                 // Upstream uses -IDIS_IME — negative icon index = resource id (ExtractIcon convention).
                 let icon_index = (0i32 - globals::TEXTSERVICE_ICON_INDEX as i32) as u32;
 
-                // Pure TSF — no hklSubstitute. Register under both langids:
-                // 0x0c04 is the canonical zh-HK profile; 0x0404 (zh-TW) is the
-                // bridge path Weasel uses for HK users — cicero-unaware apps
-                // get the 0x04040404 dummy, which hosts our TIP in-process.
-                // Only the 0x0404 profile is enabled-by-default: an enabled
-                // 0x0c04 profile makes Windows seed a second zh-HK input
-                // source (Assemblies\0x00000c04 binding → duplicate flyout
-                // row), and no input path routes through it — zh-HK input
-                // goes via the `0404:` tips DWORD on the 0x0404 profile.
-                for langid in [TEXTSERVICE_LANGID, globals::TEXTSERVICE_BRIDGE_LANGID] {
+                // Upgrade must keep the locale the user installed. A fresh
+                // install has no profile yet and stays zh-HK. Simplified is
+                // remembered by its enabled 0x0804 profile, or by
+                // InstalledLangId once a previous run of this code wrote it.
+                let locale = installed_locale();
+                let keep: &[u16] = match locale {
+                        0x0804 => &[0x0804],
+                        0x0404 => &[0x0404],
+                        _ => &[TEXTSERVICE_LANGID],
+                };
+                for stale in [TEXTSERVICE_LANGID, 0x0804u16, 0x0404u16] {
+                        if !keep.contains(&stale) {
+                                delete_profile_lang(stale);
+                        }
+                }
+
+                // One profile, the installed language, no hklSubstitute.
+                // zh-HK is 0x0c04 on its own. A second 0x0404 profile shows up
+                // as another R-Cantonese row under the same language.
+                for langid in keep {
                         let result = profile_mgr.RegisterProfile(
                                 &CLSID_RCANTONESE,
-                                langid,
+                                *langid,
                                 &GUID_PROFILE,
                                 &desc_wide[..desc_wide.len() - 1],
                                 &icon_path,
                                 icon_index,
                                 HKL::default(),
                                 0,
-                                langid == globals::TEXTSERVICE_BRIDGE_LANGID,
+                                true,
                                 0,
                         );
 
@@ -163,16 +173,15 @@ pub fn register_profiles() -> bool {
                         // RegisterProfile keeps the existing IconFile on
                         // repeat registration (TF_E_ALREADY_EXISTS) — rewrite
                         // it directly so upgrades pick up the new path.
-                        write_profile_icon(langid, &icon_file);
-                        // Same for Enable: an old install left the 0x0c04
-                        // profile enabled, and repeat registration won't
-                        // flip it back — the flyout keeps the phantom row.
-                        write_profile_enable(langid, langid == globals::TEXTSERVICE_BRIDGE_LANGID);
+                        write_profile_icon(*langid, &icon_file);
+                        // Same for Enable: repeat registration will not update it.
+                        write_profile_enable(*langid, true);
                         globals::log_error(&format!(
                                 "RegisterProfiles: {langid:#06x} result ok, icon={}",
                                 String::from_utf16_lossy(&icon_file[..icon_file.len().saturating_sub(1)])
                         ));
                 }
+                write_installed_langid(keep[0]);
                 // InstallLayoutOrTip must run in the *user's* context — when
                 // called elevated (regsvr32 RunAs admin) it lands on the
                 // .DEFAULT hive instead of the user profile, so the tip
@@ -262,6 +271,139 @@ fn write_profile_enable(langid: u16, enabled: bool) {
         }
 }
 
+/// Locale chosen by config-center, stored beside the TIP so an elevated
+/// upgrade can see it. Absent on installs that predate this value.
+fn read_installed_langid() -> Option<u16> {
+        unsafe {
+                let path = format!("SOFTWARE\\Microsoft\\CTF\\TIP\\{}\0", guid_to_string(&CLSID_RCANTONESE));
+                let wide: Vec<u16> = path.encode_utf16().collect();
+                let mut key = HKEY::default();
+                if RegOpenKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        KEY_READ | KEY_WOW64_64KEY,
+                        &mut key,
+                ) != ERROR_SUCCESS
+                {
+                        return None;
+                }
+                let name: Vec<u16> = "InstalledLangId".encode_utf16().chain(Some(0)).collect();
+                let mut data = [0u8; 4];
+                let mut size = 4u32;
+                let ok = RegQueryValueExW(key, PCWSTR(name.as_ptr()), None, None, Some(data.as_mut_ptr()), Some(&mut size))
+                        == ERROR_SUCCESS;
+                let _ = RegCloseKey(key);
+                if ok && size == 4 {
+                        Some(u32::from_le_bytes(data) as u16)
+                } else {
+                        None
+                }
+        }
+}
+
+fn write_installed_langid(langid: u16) {
+        unsafe {
+                let path = format!("SOFTWARE\\Microsoft\\CTF\\TIP\\{}\0", guid_to_string(&CLSID_RCANTONESE));
+                let wide: Vec<u16> = path.encode_utf16().collect();
+                let mut key = HKEY::default();
+                if RegCreateKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_READ | KEY_WRITE | KEY_WOW64_64KEY,
+                        None,
+                        &mut key,
+                        None,
+                ) != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let name: Vec<u16> = "InstalledLangId".encode_utf16().chain(Some(0)).collect();
+                let v = langid as u32;
+                let _ = RegSetValueExW(key, PCWSTR(name.as_ptr()), Some(0), REG_DWORD, Some(&v.to_le_bytes()));
+                let _ = RegCloseKey(key);
+        }
+}
+
+fn profile_flag(langid: u16, want_enabled: bool) -> bool {
+        unsafe {
+                let path = format!(
+                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile\\{:#010x}\\{}\0",
+                        guid_to_string(&CLSID_RCANTONESE),
+                        langid,
+                        guid_to_string(&GUID_PROFILE)
+                );
+                let wide: Vec<u16> = path.encode_utf16().collect();
+                let mut key = HKEY::default();
+                if RegOpenKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        KEY_READ | KEY_WOW64_64KEY,
+                        &mut key,
+                ) != ERROR_SUCCESS
+                {
+                        return false;
+                }
+                if !want_enabled {
+                        let _ = RegCloseKey(key);
+                        return true;
+                }
+                let name: Vec<u16> = "Enable".encode_utf16().chain(Some(0)).collect();
+                let mut data = [0u8; 4];
+                let mut size = 4u32;
+                let ok = RegQueryValueExW(key, PCWSTR(name.as_ptr()), None, None, Some(data.as_mut_ptr()), Some(&mut size))
+                        == ERROR_SUCCESS;
+                let _ = RegCloseKey(key);
+                ok && size == 4 && u32::from_le_bytes(data) == 1
+        }
+}
+
+fn installed_locale() -> u16 {
+        if let Some(id) = read_installed_langid() {
+                if matches!(id, 0x0804 | 0x0c04 | 0x0404) {
+                        return id;
+                }
+        }
+        if profile_flag(0x0804, true) {
+                0x0804
+        } else if profile_flag(0x0c04, false) {
+                0x0c04
+        } else if profile_flag(0x0404, false) {
+                0x0404
+        } else {
+                0x0c04
+        }
+}
+
+fn delete_profile_lang(langid: u16) {
+        unsafe {
+                let path = format!(
+                        "SOFTWARE\\Microsoft\\CTF\\TIP\\{}\\LanguageProfile\0",
+                        guid_to_string(&CLSID_RCANTONESE)
+                );
+                let wide: Vec<u16> = path.encode_utf16().collect();
+                let mut key = HKEY::default();
+                if RegOpenKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(wide.as_ptr()),
+                        Some(0),
+                        KEY_READ | KEY_WRITE | KEY_WOW64_64KEY,
+                        &mut key,
+                ) != ERROR_SUCCESS
+                {
+                        return;
+                }
+                let sub = format!("{langid:#010x}\0");
+                let subw: Vec<u16> = sub.encode_utf16().collect();
+                let _ = RegDeleteTreeW(key, PCWSTR(subw.as_ptr()));
+                let _ = RegCloseKey(key);
+        }
+}
+
 /// Whether the current process runs with an elevated token.
 fn is_process_elevated() -> bool {
         use windows::Win32::Security::*;
@@ -295,14 +437,13 @@ windows_link::link!("input.dll" "system" fn InstallLayoutOrTip(psz: PCWSTR, flag
 /// Enable/disable the profile in the user's input list via
 /// input.dll!InstallLayoutOrTip — weasel's mechanism; surgical, never
 /// rewrites the whole language list (that drops other IMEs' tips).
-/// Uses the 0404 langid — the tips entry lands under zh-TW there, which is
-/// also the bridge-friendly profile cicero-unaware apps resolve.
+/// Tip string is `{langid}:{clsid}{guid}` for the installed language.
 pub fn install_layout_or_tip(uninstall: bool) {
         const ILOT_UNINSTALL: u32 = 0x1;
         unsafe {
+                let langid = installed_locale();
                 let title = format!(
-                        "{:04X}:{}{}",
-                        globals::TEXTSERVICE_BRIDGE_LANGID,
+                        "{langid:04X}:{}{}",
                         guid_to_string(&CLSID_RCANTONESE),
                         guid_to_string(&GUID_PROFILE)
                 );
@@ -326,7 +467,7 @@ pub fn unregister_profiles() {
                         Ok(mgr) => mgr,
                         Err(_) => return,
                 };
-                for langid in [TEXTSERVICE_LANGID, globals::TEXTSERVICE_BRIDGE_LANGID] {
+                for langid in [TEXTSERVICE_LANGID, 0x0804u16, 0x0404u16] {
                         let _ = profile_mgr.UnregisterProfile(&CLSID_RCANTONESE, langid, &GUID_PROFILE, 0);
                 }
         }

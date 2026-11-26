@@ -16,9 +16,11 @@ windows = { version = "0.62", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Pipes",
+    "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_TextServices",
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-link = "0.100"
